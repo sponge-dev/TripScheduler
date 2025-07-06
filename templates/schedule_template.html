@@ -106,6 +106,20 @@
             border-radius: 3px;
             border-left: 3px solid #007bff;
         }
+        .visit-priority {
+            margin-top: 5px;
+        }
+        .visit-notes {
+            margin-top: 5px;
+            font-style: italic;
+        }
+        .visit-buffer-warning {
+            margin-top: 5px;
+            padding: 3px 6px;
+            background-color: #ffeaea;
+            border-left: 3px solid #dc3545;
+            border-radius: 3px;
+        }
         .directions-container {
             margin-top: 20px;
         }
@@ -159,6 +173,7 @@
             </div>
             <div class="col-md-6">
                 <h3>Visitation Schedule</h3>
+                {{warnings_section}}
                 <div class="schedule-container">
                     {{schedule_html}}
                 </div>

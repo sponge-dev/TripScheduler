@@ -362,6 +362,89 @@ def results_page():
     """Results page"""
     return render_template('results.html')
 
+@app.route('/edit-csv')
+def edit_csv_page():
+    """CSV editing page"""
+    csv_files = get_csv_files()
+    return render_template('edit_csv.html', csv_files=csv_files)
+
+@app.route('/load-csv/<filename>')
+def load_csv_data(filename):
+    """Load CSV data for editing"""
+    try:
+        import pandas as pd
+        
+        # Try to load from spreadsheets folder first
+        filepath = os.path.join('spreadsheets', filename)
+        if not os.path.exists(filepath):
+            filepath = filename
+            
+        if not os.path.exists(filepath):
+            return jsonify({'error': 'File not found'}), 404
+            
+        # Read the CSV file
+        df = pd.read_csv(filepath)
+        
+        # Add scheduling columns if they don't exist
+        if 'Scheduled_Day' not in df.columns:
+            df['Scheduled_Day'] = ''
+        if 'Scheduled_Time' not in df.columns:
+            df['Scheduled_Time'] = ''
+        if 'Priority' not in df.columns:
+            df['Priority'] = 'Normal'
+        if 'Notes' not in df.columns:
+            df['Notes'] = ''
+            
+        # Clean up data for JSON serialization
+        # Replace NaN values with empty strings
+        df = df.fillna('')
+        
+        # Convert to records for JSON serialization
+        data = df.to_dict('records')
+        columns = list(df.columns)
+        
+        # Ensure all data is JSON serializable
+        for record in data:
+            for key, value in record.items():
+                if pd.isna(value) or value is None:
+                    record[key] = ''
+                else:
+                    record[key] = str(value)
+        
+        return jsonify({
+            'data': data,
+            'columns': columns,
+            'filename': filename
+        })
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/save-csv/<filename>', methods=['POST'])
+def save_csv_data(filename):
+    """Save edited CSV data"""
+    try:
+        import pandas as pd
+        
+        data = request.json.get('data', [])
+        if not data:
+            return jsonify({'error': 'No data provided'}), 400
+            
+        # Convert back to DataFrame
+        df = pd.DataFrame(data)
+        
+        # Save to spreadsheets folder
+        filepath = os.path.join('spreadsheets', filename)
+        os.makedirs('spreadsheets', exist_ok=True)
+        
+        # Save with index=False to avoid adding row numbers
+        df.to_csv(filepath, index=False)
+        
+        return jsonify({'success': True, 'message': f'Saved {filename} successfully'})
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
 @app.route('/download/<path:filename>')
 def download_file(filename):
     """Download or view generated files"""

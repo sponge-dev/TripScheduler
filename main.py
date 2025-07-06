@@ -261,12 +261,20 @@ def geocode_addresses(df, cache_file='geocode_cache.json', config=None):
             price_col = col
             break
     
-    # Check for time/buffer column
+    # Check for buffer/time column (prioritize buffer-specific columns)
     for col in df.columns:
         col_lower = col.lower()
-        if any(keyword in col_lower for keyword in ['time', 'buffer', 'duration', 'wait']):
+        if any(keyword in col_lower for keyword in ['buffer', 'duration', 'wait']):
             time_col = col
             break
+    
+    # If no buffer column found, look for time columns
+    if not time_col:
+        for col in df.columns:
+            col_lower = col.lower()
+            if 'time' in col_lower and 'scheduled' not in col_lower:
+                time_col = col
+                break
     
     if not name_col or not address_col:
         print_error("Error: Could not find required columns. Available columns: " + str(list(df.columns)))
@@ -349,7 +357,9 @@ def geocode_addresses(df, cache_file='geocode_cache.json', config=None):
                 if cached_result is not None:
                     if DEBUG_MODE:
                         print_debug(f"Using cached result for: {address}")
-                    results.append({
+                    
+                    # Create result with all original columns preserved
+                    result = {
                         'name': location_name,
                         'address': address,
                         'original_address': address,
@@ -357,7 +367,14 @@ def geocode_addresses(df, cache_file='geocode_cache.json', config=None):
                         'latitude': lat,
                         'longitude': lon,
                         'buffer_minutes': buffer_minutes
-                    })
+                    }
+                    
+                    # Add all other columns from the original row
+                    for col in df.columns:
+                        if col not in [name_col, address_col, price_col, time_col]:
+                            result[col] = row[col]
+                    
+                    results.append(result)
                     continue
             # If cached_result is None, treat as cache miss and retry geocoding
         
@@ -448,7 +465,7 @@ def geocode_addresses(df, cache_file='geocode_cache.json', config=None):
             
             # Use the successfully geocoded address (which may be different from original)
             # This ensures the unlocated address detection works correctly
-            results.append({
+            result = {
                 'name': location_name,
                 'address': address,  # Use the reformatted address that worked
                 'original_address': original_address,  # Keep track of the original for reference
@@ -456,7 +473,14 @@ def geocode_addresses(df, cache_file='geocode_cache.json', config=None):
                 'latitude': location.latitude,
                 'longitude': location.longitude,
                 'buffer_minutes': buffer_minutes
-            })
+            }
+            
+            # Add all other columns from the original row
+            for col in df.columns:
+                if col not in [name_col, address_col, price_col, time_col]:
+                    result[col] = row[col]
+            
+            results.append(result)
         else:
             cache[original_address] = None  # Cache the original address as None
             if DEBUG_MODE:
@@ -634,9 +658,9 @@ def calculate_ors_travel_times(df, config=None, cache_file='ors_cache.json'):
     spinner = Spinner("Calculating travel times")
     spinner.start()
     
-    # Add columns for ORS data
-    df['ors_travel_time_minutes'] = 0
-    df['ors_travel_distance_km'] = 0
+    # Add columns for ORS data with appropriate data types
+    df['ors_travel_time_minutes'] = 0.0  # Use float to avoid dtype warnings
+    df['ors_travel_distance_km'] = 0.0   # Use float to avoid dtype warnings
     df['ors_directions'] = ''
     df['ors_route_geometry'] = ''
     
@@ -728,6 +752,7 @@ def validate_schedule_with_ors(schedule_df, df, config=None):
         return schedule_df, []
     
     warnings = []
+    buffer_adjustments = []
     
     # Check each day's schedule
     for cluster_name in schedule_df['Cluster'].unique():
@@ -758,11 +783,34 @@ def validate_schedule_with_ors(schedule_df, df, config=None):
                 buffer_str = next_visit.get('Buffer Time', '0 minutes')
                 buffer_minutes = int(buffer_str.split()[0]) if buffer_str.split() else 0
                 
+                # Check if this is an explicitly requested shorter buffer
+                original_buffer = next_row.get('buffer_minutes', config.get('default_buffer_minutes', 15))
+                is_explicit_short_buffer = buffer_minutes < original_buffer
+                
                 if ors_travel_time > buffer_minutes:
-                    warning = f"Day {cluster_id + 1}: Travel time to {next_visit['Location']} ({ors_travel_time:.1f} min) exceeds buffer time ({buffer_minutes} min)"
-                    warnings.append(warning)
-                    if DEBUG_MODE:
-                        print_debug(warning)
+                    if is_explicit_short_buffer:
+                        # User explicitly requested shorter buffer - show warning but don't auto-adjust
+                        warning = f"⚠️ Day {cluster_id + 1}: Travel time to {next_visit['Location']} ({ors_travel_time:.1f} min) exceeds explicitly set buffer time ({buffer_minutes} min)"
+                        warnings.append(warning)
+                        # Add warning flag to the schedule entry
+                        schedule_df.loc[schedule_df['Location'] == next_visit['Location'], 'Buffer_Warning'] = True
+                        if DEBUG_MODE:
+                            print_debug(warning)
+                    else:
+                        # Auto-adjust buffer in 15-minute increments
+                        required_buffer = int(((ors_travel_time + 14) // 15) * 15)  # Round up to nearest 15
+                        adjustment = f"Day {cluster_id + 1}: Auto-adjusted buffer for {next_visit['Location']} from {buffer_minutes} to {required_buffer} min (drive time: {ors_travel_time:.1f} min)"
+                        buffer_adjustments.append(adjustment)
+                        
+                        # Update the schedule with new buffer time
+                        schedule_df.loc[schedule_df['Location'] == next_visit['Location'], 'Buffer Time'] = f"{required_buffer} minutes"
+                        
+                        if DEBUG_MODE:
+                            print_debug(adjustment)
+    
+    # Add buffer adjustment info to warnings for display
+    if buffer_adjustments:
+        warnings.extend([f"🔧 Buffer Auto-Adjustments:"] + buffer_adjustments)
     
     return schedule_df, warnings
 
@@ -871,17 +919,71 @@ def create_schedule(df, config=None):
     # Get time constraints as arrays
     max_end_times = config.get('max_end_times', ['22:00', '22:00'])
     
+    # First, handle locations with specific day/time constraints
+    scheduled_locations = set()
+    day_schedules = {}  # Track current time for each day
+    
+    # Initialize day schedules
+    for i in range(len(dates)):
+        day_schedules[i] = datetime.strptime(start_times[i], '%H:%M')
+    
+    # Process high priority and specifically scheduled items first
     for cluster_id in df['cluster'].dropna().unique():
         cluster_data = df[df['cluster'] == cluster_id].copy()
-        date = dates[int(cluster_id)]
         
-        # Get time constraints for this day
-        max_end_time = datetime.strptime(max_end_times[int(cluster_id)], '%H:%M')
+        # Sort by priority (High -> Normal -> Low) and then by scheduled time
+        def get_priority_order(priority):
+            priority_order = {'High': 0, 'Normal': 1, 'Low': 2}
+            return priority_order.get(priority, 1)
         
-        # Start time for each day
-        current_time = datetime.strptime(start_times[int(cluster_id)], '%H:%M')
+        # Only sort by priority if the column exists
+        if 'Priority' in cluster_data.columns:
+            cluster_data = cluster_data.sort_values(by=['Priority'], key=lambda x: x.map(get_priority_order))
+        else:
+            # Add default priority column if it doesn't exist
+            cluster_data['Priority'] = 'Normal'
         
         for idx, row in cluster_data.iterrows():
+            # Check if this location has specific scheduling constraints
+            scheduled_day_raw = row.get('Scheduled_Day', '')
+            scheduled_time_raw = row.get('Scheduled_Time', '')
+            
+            # Handle NaN values and convert to string
+            scheduled_day = str(scheduled_day_raw).strip() if pd.notna(scheduled_day_raw) else ''
+            scheduled_time = str(scheduled_time_raw).strip() if pd.notna(scheduled_time_raw) else ''
+            
+            # Determine target day
+            target_day = None
+            if scheduled_day:
+                if scheduled_day.lower() == 'any':
+                    # Can be scheduled on any day - use original cluster assignment
+                    target_day = int(cluster_id)
+                elif scheduled_day.lower().startswith('day '):
+                    # Specific day requested
+                    try:
+                        target_day = int(scheduled_day.split()[1]) - 1
+                    except (ValueError, IndexError):
+                        target_day = int(cluster_id)  # Fallback to original
+                else:
+                    target_day = int(cluster_id)  # Fallback to original
+            else:
+                target_day = int(cluster_id)  # Use original cluster assignment
+            
+            # Ensure target day is valid
+            if target_day >= len(dates):
+                target_day = int(cluster_id)
+            
+            # Determine target time
+            target_time = None
+            if scheduled_time:
+                target_time = parse_scheduled_time(scheduled_time, start_times[target_day])
+            
+            # Use target time if specified, otherwise use current time for that day
+            if target_time:
+                current_time = target_time
+            else:
+                current_time = day_schedules[target_day]
+            
             # Get custom buffer time for this location, or use default
             buffer_minutes = row.get('buffer_minutes', config.get('default_buffer_minutes', 30))
             
@@ -889,25 +991,90 @@ def create_schedule(df, config=None):
             end_time = current_time + timedelta(hours=visit_hours)
             
             # Check if this visit would exceed max end time for this day
+            max_end_time = datetime.strptime(max_end_times[target_day], '%H:%M')
             if end_time > max_end_time:
+                # Try to reschedule to another day with available time
+                rescheduled = False
+                original_target_day = target_day
+                
                 if DEBUG_MODE:
-                    print_debug(f"Skipping {row['name']} - would end at {end_time.strftime('%I:%M %p')} which is after max end time {max_end_time.strftime('%I:%M %p')} for day {int(cluster_id) + 1}")
-                continue
+                    print_debug(f"Location {row['name']} would end at {end_time.strftime('%I:%M %p')} which exceeds max end time {max_end_time.strftime('%I:%M %p')} for day {target_day + 1}")
+                
+                # Try all other days to find available time
+                for try_day in range(len(dates)):
+                    if try_day == target_day:
+                        continue  # Skip the original day that didn't work
+                    
+                    # Calculate what time this would be on the new day
+                    try_current_time = day_schedules[try_day]
+                    try_end_time = try_current_time + timedelta(hours=visit_hours)
+                    try_max_end_time = datetime.strptime(max_end_times[try_day], '%H:%M')
+                    
+                    if try_end_time <= try_max_end_time:
+                        # This day has available time!
+                        target_day = try_day
+                        current_time = try_current_time
+                        end_time = try_end_time
+                        rescheduled = True
+                        
+                        # CRITICAL FIX: Update the cluster assignment in the original dataframe
+                        df.loc[idx, 'cluster'] = target_day
+                        
+                        if DEBUG_MODE:
+                            print_debug(f"✓ Rescheduled {row['name']} from Day {original_target_day + 1} to Day {target_day + 1} at {current_time.strftime('%I:%M %p')}")
+                            print_debug(f"  Updated cluster assignment from {original_target_day} to {target_day}")
+                        break
+                
+                if not rescheduled:
+                    if DEBUG_MODE:
+                        print_debug(f"✗ Unable to reschedule {row['name']} - no available time on any day")
+                    continue
             
             schedule.append({
-                'Date': date,
+                'Date': dates[target_day],
                 'Time': f"{current_time.strftime('%I:%M %p')} - {end_time.strftime('%I:%M %p')}",
                 'Location': row['name'],
                 'Address': row['address'],
                 'Price/Cost': row['price_info'],
                 'Buffer Time': f"{buffer_minutes} minutes",
-                'Cluster': f"Day {cluster_id + 1}"
+                'Cluster': f"Day {target_day + 1}",
+                'Priority': row.get('Priority', 'Normal'),
+                'Notes': row.get('Notes', '')
             })
             
-            # Add buffer time + move to next location
-            current_time = end_time + timedelta(minutes=buffer_minutes)
+            scheduled_locations.add(idx)
+            
+            # Update the day schedule time only if we didn't use a specific time
+            if not target_time:
+                day_schedules[target_day] = end_time + timedelta(minutes=buffer_minutes)
     
     return pd.DataFrame(schedule)
+
+def parse_scheduled_time(time_str, default_start_time):
+    """Parse scheduled time string into datetime object."""
+    time_str = time_str.strip().lower()
+    
+    # Handle time ranges
+    if time_str == 'morning':
+        return datetime.strptime('09:00', '%H:%M')
+    elif time_str == 'afternoon':
+        return datetime.strptime('13:00', '%H:%M')
+    elif time_str == 'evening':
+        return datetime.strptime('17:00', '%H:%M')
+    
+    # Handle specific times
+    try:
+        # Try parsing different time formats
+        for fmt in ['%I:%M %p', '%H:%M', '%I:%M%p', '%I %p']:
+            try:
+                return datetime.strptime(time_str, fmt)
+            except ValueError:
+                continue
+        
+        # If no format worked, return None to use default scheduling
+        return None
+    except:
+        return None
 
 def suggest_visit_times_for_unlocated(unlocated_df, schedule_df, config=None):
     """Suggest visit times for unlocated addresses using OpenAI with ORS context."""
@@ -1129,6 +1296,21 @@ def create_side_by_side_schedule_html(schedule_df, df=None):
                         </div>
                         """
             
+            # Add priority and notes display
+            priority_info = ""
+            if 'Priority' in visit and visit['Priority'] and visit['Priority'] != 'Normal':
+                priority_class = 'text-danger' if visit['Priority'] == 'High' else 'text-warning'
+                priority_info = f'<div class="visit-priority"><small class="{priority_class}"><i class="fas fa-star"></i> {visit["Priority"]} Priority</small></div>'
+            
+            notes_info = ""
+            if 'Notes' in visit and visit['Notes'] and str(visit['Notes']).strip() and str(visit['Notes']).lower() != 'nan':
+                notes_info = f'<div class="visit-notes"><small class="text-info"><i class="fas fa-sticky-note"></i> {visit["Notes"]}</small></div>'
+            
+            # Add buffer warning display
+            buffer_warning_info = ""
+            if 'Buffer_Warning' in visit and visit['Buffer_Warning']:
+                buffer_warning_info = f'<div class="visit-buffer-warning"><small class="text-danger"><i class="fas fa-exclamation-triangle"></i> <strong>Warning:</strong> Drive time exceeds buffer time</small></div>'
+
             day_html += f"""
             <div class="visit-item">
                 <div class="visit-time">{visit['Time']}</div>
@@ -1136,6 +1318,9 @@ def create_side_by_side_schedule_html(schedule_df, df=None):
                 <div class="visit-address">{visit['Address']}</div>
                 <div class="visit-price">{visit['Price/Cost']}</div>
                 <small class="text-muted">Buffer: {visit['Buffer Time']}</small>
+                {priority_info}
+                {notes_info}
+                {buffer_warning_info}
                 {driving_info}
             </div>
             """
@@ -1301,7 +1486,8 @@ def generate_html_output(df, schedule_df, output_dir, filename='location_schedul
         title="Location Visitation Schedule",
         map_html=map_html,
         schedule_html=schedule_html,
-        unlocated_section=""
+        unlocated_section="",
+        warnings=[]  # Default empty warnings for individual day files
     )
     
     # Save to specified output directory
@@ -1393,7 +1579,7 @@ def prepare_directions_data(df, schedule_df, config=None):
     
     return directions_data, day_options
 
-def generate_combined_html_output(df, schedule_df, output_dir, filename='location_schedule_combined.html', unlocated_df=None, unlocated_suggestions=None):
+def generate_combined_html_output(df, schedule_df, output_dir, filename='location_schedule_combined.html', unlocated_df=None, unlocated_suggestions=None, warnings=None):
     """Generate combined HTML output with map and schedule side by side."""
     # Create the map
     center_lat = df['latitude'].mean()
@@ -1535,6 +1721,19 @@ def generate_combined_html_output(df, schedule_df, output_dir, filename='locatio
     
     # Load and render template
     template_content = load_html_template()
+    # Generate warnings section HTML
+    warnings_section = ""
+    if warnings:
+        warnings_html = ""
+        for warning in warnings:
+            warnings_html += f'<div class="mb-1">{warning}</div>'
+        warnings_section = f"""
+        <div class="alert alert-warning mb-3">
+            <h6><i class="fas fa-exclamation-triangle me-2"></i>Schedule Warnings</h6>
+            {warnings_html}
+        </div>
+        """
+    
     html_content = render_html_template(
         template_content,
         title="Location Visitation Schedule - Combined View",
@@ -1542,7 +1741,8 @@ def generate_combined_html_output(df, schedule_df, output_dir, filename='locatio
         schedule_html=schedule_html,
         unlocated_section=unlocated_section,
         directions_data=json.dumps(directions_data),
-        day_options=day_options
+        day_options=day_options,
+        warnings_section=warnings_section
     )
     
     # Save to specified output directory
@@ -1555,10 +1755,10 @@ def generate_combined_html_output(df, schedule_df, output_dir, filename='locatio
     # Auto-open the HTML file
     webbrowser.open('file://' + os.path.abspath(output_path))
 
-def generate_html_maps(df, schedule_df, output_dir, unlocated_suggestions=None, unlocated_df=None):
+def generate_html_maps(df, schedule_df, output_dir, unlocated_suggestions=None, unlocated_df=None, warnings=None):
     """Generate HTML maps for the schedule."""
     # Only generate the combined map now
-    generate_combined_html_output(df, schedule_df, output_dir, 'combined_map.html', unlocated_df=unlocated_df, unlocated_suggestions=unlocated_suggestions)
+    generate_combined_html_output(df, schedule_df, output_dir, 'combined_map.html', unlocated_df=unlocated_df, unlocated_suggestions=unlocated_suggestions, warnings=warnings)
 
 def main():
     global DEBUG_MODE
@@ -1716,7 +1916,7 @@ def main():
     trip_output_dir = create_trip_output_directory(trip_name)
     
     # Step 9: Generate HTML maps for the schedule
-    generate_html_maps(df, schedule_df, trip_output_dir, unlocated_suggestions, unlocated_df)
+    generate_html_maps(df, schedule_df, trip_output_dir, unlocated_suggestions, unlocated_df, ors_warnings)
     
     # Step 10: Generate HTML output for each day (for reference)
     for cluster_id in df['cluster'].unique():

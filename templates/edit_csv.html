@@ -1,0 +1,380 @@
+{% extends "base.html" %}
+
+{% block title %}CSV Editor - Location Visitation Scheduler{% endblock %}
+
+{% block content %}
+<div class="row">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header">
+                <h4 class="mb-0">
+                    <i class="fas fa-edit me-2"></i>
+                    CSV Editor - Schedule Specific Events
+                </h4>
+            </div>
+            <div class="card-body">
+                <!-- File Selection -->
+                <div class="row mb-4">
+                    <div class="col-md-6">
+                        <h5>Select CSV File to Edit</h5>
+                        {% if csv_files %}
+                            <select class="form-select" id="csvFileSelect">
+                                <option value="">Choose a file to edit...</option>
+                                {% for file in csv_files %}
+                                    <option value="{{ file }}">{{ file }}</option>
+                                {% endfor %}
+                            </select>
+                        {% else %}
+                            <div class="alert alert-warning">
+                                <i class="fas fa-exclamation-triangle me-2"></i>
+                                No CSV files found. Please upload a file from the home page first.
+                            </div>
+                        {% endif %}
+                    </div>
+                    <div class="col-md-6">
+                        <h5>Actions</h5>
+                        <button class="btn btn-primary" id="loadBtn" disabled>
+                            <i class="fas fa-upload me-1"></i>Load File
+                        </button>
+                        <button class="btn btn-success" id="saveBtn" disabled>
+                            <i class="fas fa-save me-1"></i>Save Changes
+                        </button>
+                        <a href="{{ url_for('index') }}" class="btn btn-outline-secondary">
+                            <i class="fas fa-arrow-left me-1"></i>Back to Home
+                        </a>
+                    </div>
+                </div>
+
+                <!-- Instructions -->
+                <div class="alert alert-info" id="instructions">
+                    <h6><i class="fas fa-info-circle me-2"></i>How to Use the CSV Editor</h6>
+                    <ul class="mb-0">
+                        <li><strong>Scheduled_Day:</strong> Specify which day (Day 1, Day 2, etc.) or leave blank for automatic assignment</li>
+                        <li><strong>Scheduled_Time:</strong> Set specific time (e.g., "2:00 PM") or leave blank for automatic scheduling</li>
+                        <li><strong>Priority:</strong> Set to "High", "Normal", or "Low" to influence scheduling order</li>
+                        <li><strong>Notes:</strong> Add any special instructions or notes for this location</li>
+                    </ul>
+                </div>
+
+                <!-- Loading Spinner -->
+                <div id="loadingSpinner" style="display: none;" class="text-center py-4">
+                    <div class="spinner-border text-primary" role="status">
+                        <span class="visually-hidden">Loading...</span>
+                    </div>
+                    <p class="mt-2">Loading CSV data...</p>
+                </div>
+
+                <!-- CSV Editor Table -->
+                <div id="csvEditor" style="display: none;">
+                    <div class="d-flex justify-content-between align-items-center mb-3">
+                        <h5 id="currentFileName">Editing: </h5>
+                        <div>
+                            <button class="btn btn-outline-primary btn-sm" id="addRowBtn">
+                                <i class="fas fa-plus me-1"></i>Add Row
+                            </button>
+                            <button class="btn btn-outline-danger btn-sm" id="deleteSelectedBtn" disabled>
+                                <i class="fas fa-trash me-1"></i>Delete Selected
+                            </button>
+                        </div>
+                    </div>
+                    
+                    <div class="table-responsive">
+                        <table class="table table-striped table-hover" id="csvTable">
+                            <thead class="table-dark">
+                                <!-- Headers will be populated dynamically -->
+                            </thead>
+                            <tbody>
+                                <!-- Data will be populated dynamically -->
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- Error Display -->
+                <div id="errorSection" style="display: none;">
+                    <div class="alert alert-danger">
+                        <h5><i class="fas fa-exclamation-circle me-2"></i>Error</h5>
+                        <p id="errorMessage"></p>
+                    </div>
+                </div>
+
+                <!-- Success Display -->
+                <div id="successSection" style="display: none;">
+                    <div class="alert alert-success">
+                        <h5><i class="fas fa-check-circle me-2"></i>Success</h5>
+                        <p id="successMessage"></p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Scheduling Help Modal -->
+<div class="modal fade" id="helpModal" tabindex="-1">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">
+                    <i class="fas fa-question-circle me-2"></i>
+                    Scheduling Options Help
+                </h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <h6>Scheduled_Day Options:</h6>
+                <ul>
+                    <li><strong>Day 1, Day 2, Day 3, etc.</strong> - Assign to specific day</li>
+                    <li><strong>Any</strong> - Can be scheduled on any day</li>
+                    <li><strong>Blank/Empty</strong> - Automatic assignment based on location clustering</li>
+                </ul>
+                
+                <h6 class="mt-3">Scheduled_Time Options:</h6>
+                <ul>
+                    <li><strong>Specific times:</strong> "9:00 AM", "2:30 PM", "14:30", etc.</li>
+                    <li><strong>Time ranges:</strong> "Morning" (9-12), "Afternoon" (12-17), "Evening" (17-21)</li>
+                    <li><strong>Blank/Empty</strong> - Automatic time assignment</li>
+                </ul>
+                
+                <h6 class="mt-3">Priority Levels:</h6>
+                <ul>
+                    <li><strong>High</strong> - Scheduled first, gets preferred time slots</li>
+                    <li><strong>Normal</strong> - Standard scheduling priority</li>
+                    <li><strong>Low</strong> - Scheduled last, fills remaining slots</li>
+                </ul>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let currentData = [];
+let currentColumns = [];
+let currentFilename = '';
+
+document.addEventListener('DOMContentLoaded', function() {
+    const csvSelect = document.getElementById('csvFileSelect');
+    const loadBtn = document.getElementById('loadBtn');
+    const saveBtn = document.getElementById('saveBtn');
+    const addRowBtn = document.getElementById('addRowBtn');
+    const deleteSelectedBtn = document.getElementById('deleteSelectedBtn');
+
+    // Enable load button when file is selected
+    csvSelect.addEventListener('change', function() {
+        loadBtn.disabled = this.value === '';
+    });
+
+    // Load CSV file
+    loadBtn.addEventListener('click', function() {
+        const filename = csvSelect.value;
+        if (!filename) return;
+
+        showLoading(true);
+        hideMessages();
+
+        fetch(`/load-csv/${filename}`)
+            .then(response => response.json())
+            .then(data => {
+                if (data.error) {
+                    showError(data.error);
+                } else {
+                    currentData = data.data;
+                    currentColumns = data.columns;
+                    currentFilename = data.filename;
+                    displayCSVData();
+                    saveBtn.disabled = false;
+                }
+            })
+            .catch(error => {
+                showError('Error loading CSV: ' + error);
+            })
+            .finally(() => {
+                showLoading(false);
+            });
+    });
+
+    // Save CSV file
+    saveBtn.addEventListener('click', function() {
+        if (!currentFilename || currentData.length === 0) return;
+
+        showLoading(true);
+        hideMessages();
+
+        fetch(`/save-csv/${currentFilename}`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                data: currentData
+            })
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.error) {
+                showError(data.error);
+            } else {
+                showSuccess(data.message);
+            }
+        })
+        .catch(error => {
+            showError('Error saving CSV: ' + error);
+        })
+        .finally(() => {
+            showLoading(false);
+        });
+    });
+
+    // Add new row
+    addRowBtn.addEventListener('click', function() {
+        const newRow = {};
+        currentColumns.forEach(col => {
+            newRow[col] = '';
+        });
+        currentData.push(newRow);
+        displayCSVData();
+    });
+
+    // Delete selected rows
+    deleteSelectedBtn.addEventListener('click', function() {
+        const checkboxes = document.querySelectorAll('input[name="rowSelect"]:checked');
+        const indicesToDelete = Array.from(checkboxes).map(cb => parseInt(cb.value)).sort((a, b) => b - a);
+        
+        indicesToDelete.forEach(index => {
+            currentData.splice(index, 1);
+        });
+        
+        displayCSVData();
+        deleteSelectedBtn.disabled = true;
+    });
+});
+
+function displayCSVData() {
+    const table = document.getElementById('csvTable');
+    const thead = table.querySelector('thead');
+    const tbody = table.querySelector('tbody');
+    
+    document.getElementById('currentFileName').textContent = `Editing: ${currentFilename}`;
+    
+    // Create headers
+    thead.innerHTML = '';
+    const headerRow = thead.insertRow();
+    
+    // Add checkbox column
+    const selectHeader = document.createElement('th');
+    selectHeader.innerHTML = '<input type="checkbox" id="selectAll">';
+    headerRow.appendChild(selectHeader);
+    
+    // Add data columns
+    currentColumns.forEach(col => {
+        const th = document.createElement('th');
+        th.textContent = col;
+        if (col === 'Scheduled_Day' || col === 'Scheduled_Time' || col === 'Priority') {
+            th.innerHTML += ' <i class="fas fa-question-circle text-info" style="cursor: pointer;" data-bs-toggle="modal" data-bs-target="#helpModal"></i>';
+        }
+        headerRow.appendChild(th);
+    });
+    
+    // Create data rows
+    tbody.innerHTML = '';
+    currentData.forEach((row, index) => {
+        const tr = tbody.insertRow();
+        
+        // Add checkbox
+        const selectCell = tr.insertCell();
+        selectCell.innerHTML = `<input type="checkbox" name="rowSelect" value="${index}">`;
+        
+        // Add data cells
+        currentColumns.forEach(col => {
+            const cell = tr.insertCell();
+            const value = row[col] || '';
+            
+            if (col === 'Scheduled_Day') {
+                cell.innerHTML = createDaySelect(value, index, col);
+            } else if (col === 'Scheduled_Time') {
+                cell.innerHTML = createTimeInput(value, index, col);
+            } else if (col === 'Priority') {
+                cell.innerHTML = createPrioritySelect(value, index, col);
+            } else {
+                cell.innerHTML = `<input type="text" class="form-control form-control-sm" value="${value}" onchange="updateCell(${index}, '${col}', this.value)">`;
+            }
+        });
+    });
+    
+    // Setup select all functionality
+    document.getElementById('selectAll').addEventListener('change', function() {
+        const checkboxes = document.querySelectorAll('input[name="rowSelect"]');
+        checkboxes.forEach(cb => cb.checked = this.checked);
+        updateDeleteButton();
+    });
+    
+    // Setup individual checkbox listeners
+    document.querySelectorAll('input[name="rowSelect"]').forEach(cb => {
+        cb.addEventListener('change', updateDeleteButton);
+    });
+    
+    document.getElementById('csvEditor').style.display = 'block';
+}
+
+function createDaySelect(value, index, col) {
+    const options = ['', 'Any', 'Day 1', 'Day 2', 'Day 3', 'Day 4', 'Day 5'];
+    let html = `<select class="form-select form-select-sm" onchange="updateCell(${index}, '${col}', this.value)">`;
+    options.forEach(option => {
+        const selected = option === value ? 'selected' : '';
+        html += `<option value="${option}" ${selected}>${option || 'Auto'}</option>`;
+    });
+    html += '</select>';
+    return html;
+}
+
+function createTimeInput(value, index, col) {
+    return `<input type="text" class="form-control form-control-sm" value="${value}" 
+            placeholder="e.g., 2:00 PM, Morning" 
+            onchange="updateCell(${index}, '${col}', this.value)">`;
+}
+
+function createPrioritySelect(value, index, col) {
+    const options = ['Normal', 'High', 'Low'];
+    let html = `<select class="form-select form-select-sm" onchange="updateCell(${index}, '${col}', this.value)">`;
+    options.forEach(option => {
+        const selected = option === value ? 'selected' : '';
+        html += `<option value="${option}" ${selected}>${option}</option>`;
+    });
+    html += '</select>';
+    return html;
+}
+
+function updateCell(index, column, value) {
+    currentData[index][column] = value;
+}
+
+function updateDeleteButton() {
+    const checkedBoxes = document.querySelectorAll('input[name="rowSelect"]:checked');
+    document.getElementById('deleteSelectedBtn').disabled = checkedBoxes.length === 0;
+}
+
+function showLoading(show) {
+    document.getElementById('loadingSpinner').style.display = show ? 'block' : 'none';
+}
+
+function showError(message) {
+    document.getElementById('errorMessage').textContent = message;
+    document.getElementById('errorSection').style.display = 'block';
+}
+
+function showSuccess(message) {
+    document.getElementById('successMessage').textContent = message;
+    document.getElementById('successSection').style.display = 'block';
+}
+
+function hideMessages() {
+    document.getElementById('errorSection').style.display = 'none';
+    document.getElementById('successSection').style.display = 'none';
+}
+</script>
+{% endblock %} 
