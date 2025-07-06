@@ -810,7 +810,7 @@ def validate_schedule_with_ors(schedule_df, df, config=None):
     
     # Add buffer adjustment info to warnings for display
     if buffer_adjustments:
-        warnings.extend([f"🔧 Buffer Auto-Adjustments:"] + buffer_adjustments)
+        warnings.extend([f"[AUTO-ADJUST] Buffer Auto-Adjustments:"] + buffer_adjustments)
     
     return schedule_df, warnings
 
@@ -1263,7 +1263,7 @@ def create_schedule(df, config=None):
                 
                 if not rescheduled:
                     if DEBUG_MODE:
-                        print_debug(f"✗ Unable to reschedule {row['name']} - no available time on any day")
+                        print_debug(f"[X] Unable to reschedule {row['name']} - no available time on any day")
                     continue
             
             schedule.append({
@@ -1508,12 +1508,16 @@ def create_side_by_side_schedule_html(schedule_df, df=None):
             <div class="day-header">{date}</div>
         """
         
-        for idx, visit in day_data.iterrows():
+        # Reset index for easier iteration
+        day_data_reset = day_data.reset_index(drop=True)
+        for pos, visit in day_data_reset.iterrows():
             # Find driving info to next location if available
             driving_info = ""
-            if df is not None and idx < len(day_data) - 1:
+            if df is not None and pos < len(day_data_reset) - 1:
+                # Get the next visit in the schedule
+                next_visit = day_data_reset.iloc[pos + 1]
+                
                 # Find the corresponding entry in the main DataFrame for the NEXT location
-                next_visit = day_data.iloc[list(day_data.index).index(idx) + 1]
                 next_match = df[(df['name'] == next_visit['Location']) & 
                                (df['address'] == next_visit['Address'])]
                 
@@ -1679,7 +1683,7 @@ def generate_html_output(df, schedule_df, output_dir, filename='location_schedul
                                 color=color,
                                 weight=3,
                                 opacity=0.8,
-                                popup=f"Route: {current_row['name']} → {next_row['name']}"
+                                popup=f"Route: {current_row['name']} -> {next_row['name']}"
                             ).add_to(m)
                         else:
                             # Fallback to straight line
@@ -1688,7 +1692,7 @@ def generate_html_output(df, schedule_df, output_dir, filename='location_schedul
                                 color=color,
                                 weight=2,
                                 opacity=0.6,
-                                popup=f"Route: {current_row['name']} → {next_row['name']}"
+                                popup=f"Route: {current_row['name']} -> {next_row['name']}"
                             ).add_to(m)
                     else:
                         # No route geometry, use straight line
@@ -1697,7 +1701,7 @@ def generate_html_output(df, schedule_df, output_dir, filename='location_schedul
                             color=color,
                             weight=2,
                             opacity=0.6,
-                            popup=f"Route: {current_row['name']} → {next_row['name']}"
+                            popup=f"Route: {current_row['name']} -> {next_row['name']}"
                         ).add_to(m)
                 except (json.JSONDecodeError, KeyError, IndexError):
                     # Error parsing route geometry, use straight line
@@ -1706,7 +1710,7 @@ def generate_html_output(df, schedule_df, output_dir, filename='location_schedul
                         color=color,
                         weight=2,
                         opacity=0.6,
-                        popup=f"Route: {current_row['name']} → {next_row['name']}"
+                        popup=f"Route: {current_row['name']} -> {next_row['name']}"
                     ).add_to(m)
     
     # Convert map to HTML
@@ -1885,7 +1889,7 @@ def generate_combined_html_output(df, schedule_df, output_dir, filename='locatio
                                     color=route_color,
                                     weight=3,
                                     opacity=0.8,
-                                    popup=f"Route: {current_visit['Location']} → {next_visit['Location']}"
+                                    popup=f"Route: {current_visit['Location']} -> {next_visit['Location']}"
                                 ).add_to(m)
                             else:
                                 # Fallback to straight line
@@ -1894,7 +1898,7 @@ def generate_combined_html_output(df, schedule_df, output_dir, filename='locatio
                                     color=route_color,
                                     weight=2,
                                     opacity=0.6,
-                                    popup=f"Route: {current_visit['Location']} → {next_visit['Location']}"
+                                    popup=f"Route: {current_visit['Location']} -> {next_visit['Location']}"
                                 ).add_to(m)
                         else:
                             # No route geometry, use straight line
@@ -1903,7 +1907,7 @@ def generate_combined_html_output(df, schedule_df, output_dir, filename='locatio
                                 color=route_color,
                                 weight=2,
                                 opacity=0.6,
-                                popup=f"Route: {current_visit['Location']} → {next_visit['Location']}"
+                                popup=f"Route: {current_visit['Location']} -> {next_visit['Location']}"
                             ).add_to(m)
                     except (json.JSONDecodeError, KeyError, IndexError):
                         # Error parsing route geometry, use straight line
@@ -1912,7 +1916,7 @@ def generate_combined_html_output(df, schedule_df, output_dir, filename='locatio
                             color=route_color,
                             weight=2,
                             opacity=0.6,
-                            popup=f"Route: {current_visit['Location']} → {next_visit['Location']}"
+                            popup=f"Route: {current_visit['Location']} -> {next_visit['Location']}"
                         ).add_to(m)
 
     # Convert map to HTML
@@ -1937,7 +1941,7 @@ def generate_combined_html_output(df, schedule_df, output_dir, filename='locatio
         unlocated_list = ""
         for _, row in unlocated_df.iterrows():
             location_name = row.get('Apartment', row.get('name', 'Unknown Location'))
-            unlocated_list += f"• {location_name}: {row['address']}<br>"
+            unlocated_list += f"- {location_name}: {row['address']}<br>"
         
         suggestions_html = f"<br><br><strong>Suggested Times:</strong><br><pre style='white-space: pre-wrap; margin: 0;'>{unlocated_suggestions}</pre>" if unlocated_suggestions else ""
         unlocated_section = f"""

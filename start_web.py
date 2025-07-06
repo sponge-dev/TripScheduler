@@ -33,7 +33,7 @@ def check_dependencies():
         print("[ERROR] Missing required packages:")
         for package in missing_packages:
             print(f"   - {package}")
-        print("\n💡 To install missing packages, run:")
+        print("\n[TIP] To install missing packages, run:")
         print("   pip install -r requirements-web.txt")
         print("\n   Or install individually:")
         for package in missing_packages:
@@ -64,11 +64,11 @@ def main():
     os.makedirs('templates', exist_ok=True)
     os.makedirs('output', exist_ok=True)
     
-    print("📁 Created necessary directories")
+    print("[OK] Created necessary directories")
     
     # Check if config file exists
     if not os.path.exists('config.json'):
-        print("⚙️  Creating default configuration...")
+        print("[CONFIG] Creating default configuration...")
         # Import and run the config creation from main.py
         try:
             sys.path.append('.')
