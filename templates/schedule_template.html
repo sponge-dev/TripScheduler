@@ -13,6 +13,37 @@
             height: 600px;
             border: 1px solid #ddd;
             border-radius: 5px;
+            position: relative;
+        }
+        .map-content {
+            height: 550px;
+            width: 100%;
+        }
+        .map-legend {
+            position: absolute;
+            bottom: 10px;
+            left: 10px;
+            background: white;
+            padding: 8px 12px;
+            border-radius: 5px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            font-size: 12px;
+            z-index: 1000;
+        }
+        .legend-item {
+            display: flex;
+            align-items: center;
+            margin: 2px 0;
+        }
+        .legend-box {
+            width: 16px;
+            height: 16px;
+            border-radius: 3px;
+            margin-right: 6px;
+            border: 1px solid #ccc;
+        }
+        .legend-text {
+            font-size: 11px;
         }
         .schedule-container {
             max-height: 600px;
@@ -68,6 +99,40 @@
             color: #28a745;
             font-weight: bold;
         }
+        .visit-driving-info {
+            margin-top: 8px;
+            padding: 4px 8px;
+            background-color: #e7f3ff;
+            border-radius: 3px;
+            border-left: 3px solid #007bff;
+        }
+        .directions-container {
+            margin-top: 20px;
+        }
+        .directions-dropdown {
+            margin-bottom: 15px;
+        }
+        .directions-content {
+            background-color: #f8f9fa;
+            border: 1px solid #dee2e6;
+            border-radius: 5px;
+            padding: 15px;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+        .direction-step {
+            margin-bottom: 8px;
+            padding: 5px;
+            border-left: 3px solid #007bff;
+            padding-left: 10px;
+        }
+        .route-summary {
+            background-color: #e9ecef;
+            padding: 10px;
+            border-radius: 5px;
+            margin-bottom: 10px;
+            font-weight: bold;
+        }
     </style>
 </head>
 <body>
@@ -77,7 +142,19 @@
             <div class="col-md-6">
                 <h3>Interactive Map</h3>
                 <div class="map-container">
-                    {{map_html}}
+                    <div class="map-content">
+                        {{map_html}}
+                    </div>
+                    <div class="map-legend">
+                        <div class="legend-item">
+                            <div class="legend-box" style="background-color: #dc3545;"></div>
+                            <span class="legend-text">Day 1</span>
+                        </div>
+                        <div class="legend-item">
+                            <div class="legend-box" style="background-color: #0d6efd;"></div>
+                            <span class="legend-text">Day 2</span>
+                        </div>
+                    </div>
                 </div>
             </div>
             <div class="col-md-6">
@@ -87,14 +164,70 @@
                 </div>
             </div>
         </div>
-        <div class="row mt-3">
+        
+        <!-- Driving Directions Section -->
+        <div class="row directions-container">
             <div class="col-12">
-                <div class="alert alert-info">
-                    <strong>Legend:</strong> Red markers = Day 1, Blue markers = Day 2
+                <h3>Driving Directions</h3>
+                <div class="directions-dropdown">
+                    <select id="daySelector" class="form-select" onchange="showDirections()">
+                        <option value="">Select a day to view directions</option>
+                        {{day_options}}
+                    </select>
+                </div>
+                <div id="directionsContent" class="directions-content" style="display: none;">
+                    <!-- Directions will be populated here -->
                 </div>
             </div>
         </div>
+        
         {{unlocated_section}}
     </div>
+    
+    <script>
+        // Store directions data
+        const directionsData = {{directions_data}};
+        
+        function showDirections() {
+            const daySelector = document.getElementById('daySelector');
+            const directionsContent = document.getElementById('directionsContent');
+            const selectedDay = daySelector.value;
+            
+            if (!selectedDay || !directionsData[selectedDay]) {
+                directionsContent.style.display = 'none';
+                return;
+            }
+            
+            const dayData = directionsData[selectedDay];
+            let html = '';
+            
+            if (dayData.routes && dayData.routes.length > 0) {
+                html += '<div class="route-summary">';
+                html += `<i class="fas fa-route"></i> Total Distance: ${dayData.totalDistance} km | `;
+                html += `<i class="fas fa-clock"></i> Total Travel Time: ${dayData.totalTime} minutes`;
+                html += '</div>';
+                
+                dayData.routes.forEach((route, index) => {
+                    html += `<div class="mb-3">`;
+                    html += `<h6><i class="fas fa-map-marker-alt"></i> ${route.from} → ${route.to}</h6>`;
+                    html += `<small class="text-muted">${route.distance} km • ${route.duration} minutes</small>`;
+                    
+                    if (route.directions && route.directions.length > 0) {
+                        html += '<div class="mt-2">';
+                        route.directions.forEach((direction, stepIndex) => {
+                            html += `<div class="direction-step">${stepIndex + 1}. ${direction}</div>`;
+                        });
+                        html += '</div>';
+                    }
+                    html += '</div>';
+                });
+            } else {
+                html = '<p class="text-muted">No driving directions available for this day.</p>';
+            }
+            
+            directionsContent.innerHTML = html;
+            directionsContent.style.display = 'block';
+        }
+    </script>
 </body>
 </html> 

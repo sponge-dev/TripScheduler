@@ -1,0 +1,357 @@
+{% extends "base.html" %}
+
+{% block title %}Home - Location Visitation Scheduler{% endblock %}
+
+{% block content %}
+<div class="row">
+    <div class="col-lg-8">
+        <div class="card">
+            <div class="card-header">
+                <h4 class="mb-0">
+                    <i class="fas fa-file-csv me-2"></i>
+                    CSV File Management
+                </h4>
+            </div>
+            <div class="card-body">
+                <!-- File Upload Section -->
+                <div class="mb-4">
+                    <h5>Upload New CSV File</h5>
+                    <form action="{{ url_for('upload_file') }}" method="post" enctype="multipart/form-data">
+                        <div class="input-group">
+                            <input type="file" class="form-control" name="file" accept=".csv" required>
+                            <button class="btn btn-outline-secondary" type="submit">
+                                <i class="fas fa-upload me-1"></i>Upload
+                            </button>
+                        </div>
+                        <div class="form-text">
+                            Upload a CSV file with location data (apartment names, addresses, prices, etc.)
+                        </div>
+                    </form>
+                </div>
+
+                <!-- File Selection Section -->
+                <div class="mb-4">
+                    <h5>Select CSV File</h5>
+                    {% if csv_files %}
+                        <select class="form-select" id="csvFileSelect">
+                            <option value="">Choose a file...</option>
+                            {% for file in csv_files %}
+                                <option value="{{ file }}">{{ file }}</option>
+                            {% endfor %}
+                        </select>
+                        <div class="mt-2">
+                            <button class="btn btn-info btn-sm" id="previewBtn" disabled>
+                                <i class="fas fa-eye me-1"></i>Preview
+                            </button>
+                        </div>
+                    {% else %}
+                        <div class="alert alert-warning">
+                            <i class="fas fa-exclamation-triangle me-2"></i>
+                            No CSV files found. Please upload a file first.
+                        </div>
+                    {% endif %}
+                </div>
+
+                <!-- File Preview Section -->
+                <div id="previewSection" style="display: none;">
+                    <h5>File Preview</h5>
+                    <div id="previewContent" class="file-preview">
+                        <!-- Preview content will be loaded here -->
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Generate Report Section -->
+        <div class="card mt-4">
+            <div class="card-header">
+                <h4 class="mb-0">
+                    <i class="fas fa-play-circle me-2"></i>
+                    Generate Schedule
+                </h4>
+            </div>
+            <div class="card-body">
+                <form id="generateForm">
+                    <div class="row">
+                        <div class="col-md-8">
+                            <div class="form-check">
+                                <input class="form-check-input" type="checkbox" id="debugMode">
+                                <label class="form-check-label" for="debugMode">
+                                    Enable debug mode (detailed output)
+                                </label>
+                            </div>
+                        </div>
+                        <div class="col-md-4 text-end">
+                            <button type="submit" class="btn btn-success" id="generateBtn" disabled>
+                                <i class="fas fa-cogs me-1"></i>
+                                Generate Report
+                            </button>
+                        </div>
+                    </div>
+                </form>
+
+                <!-- Progress Section -->
+                <div class="progress-container" id="progressContainer">
+                    <div class="mt-3">
+                        <div class="d-flex justify-content-between align-items-center mb-2">
+                            <span id="progressMessage">Processing...</span>
+                            <span id="progressPercent">0%</span>
+                        </div>
+                        <div class="progress">
+                            <div class="progress-bar progress-bar-striped progress-bar-animated" 
+                                 id="progressBar" role="progressbar" style="width: 0%"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Results Section -->
+                <div id="resultsSection" style="display: none;">
+                    <div class="alert alert-success mt-3">
+                        <h5><i class="fas fa-check-circle me-2"></i>Processing Complete!</h5>
+                        <p class="mb-2">Your schedule has been generated successfully. Click the button below to open your HTML schedule file.</p>
+                        <div class="mt-3">
+                            <a href="#" class="btn btn-success" id="downloadBtn">
+                                <i class="fas fa-external-link-alt me-1"></i>
+                                Open File
+                            </a>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Error Section -->
+                <div id="errorSection" style="display: none;">
+                    <div class="alert alert-danger mt-3">
+                        <h5><i class="fas fa-exclamation-circle me-2"></i>Error</h5>
+                        <p id="errorMessage"></p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="col-lg-4">
+        <!-- Quick Settings -->
+        <div class="card">
+            <div class="card-header">
+                <h5 class="mb-0">
+                    <i class="fas fa-sliders-h me-2"></i>
+                    Quick Settings
+                </h5>
+            </div>
+            <div class="card-body">
+                <div class="mb-3">
+                    <small class="text-muted">Number of Days:</small>
+                    <div class="fw-bold">{{ config.clustering.n_clusters }} days</div>
+                </div>
+                <div class="mb-3">
+                    <small class="text-muted">Visit Duration:</small>
+                    <div class="fw-bold">{{ config.default_visit_hours }} hours</div>
+                </div>
+                <div class="mb-3">
+                    <small class="text-muted">Buffer Time:</small>
+                    <div class="fw-bold">{{ config.default_buffer_minutes }} minutes</div>
+                </div>
+                <a href="{{ url_for('config_page') }}" class="btn btn-outline-primary btn-sm">
+                    <i class="fas fa-edit me-1"></i>
+                    Edit Settings
+                </a>
+            </div>
+        </div>
+
+        <!-- Help -->
+        <div class="card mt-4">
+            <div class="card-header">
+                <h5 class="mb-0">
+                    <i class="fas fa-question-circle me-2"></i>
+                    How to Use
+                </h5>
+            </div>
+            <div class="card-body">
+                <ol class="small">
+                    <li>Upload or select a CSV file with location data</li>
+                    <li>Preview the file to ensure it has the correct format</li>
+                    <li>Adjust settings if needed</li>
+                    <li>Click "Generate Report" to create your schedule</li>
+                    <li>View and download the results</li>
+                </ol>
+                <div class="mt-3">
+                    <strong>Required CSV Columns:</strong>
+                    <ul class="small mb-0">
+                        <li>Location/Apartment name</li>
+                        <li>Address</li>
+                        <li>Price information (optional)</li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    const csvSelect = document.getElementById('csvFileSelect');
+    const previewBtn = document.getElementById('previewBtn');
+    const generateBtn = document.getElementById('generateBtn');
+    const generateForm = document.getElementById('generateForm');
+    const previewSection = document.getElementById('previewSection');
+    const progressContainer = document.getElementById('progressContainer');
+    const resultsSection = document.getElementById('resultsSection');
+    const errorSection = document.getElementById('errorSection');
+
+    // Enable preview button when file is selected
+    csvSelect.addEventListener('change', function() {
+        const hasFile = this.value !== '';
+        previewBtn.disabled = !hasFile;
+        generateBtn.disabled = !hasFile;
+        
+        if (!hasFile) {
+            previewSection.style.display = 'none';
+        }
+    });
+
+    // Preview file
+    previewBtn.addEventListener('click', function() {
+        const filename = csvSelect.value;
+        if (!filename) return;
+
+        fetch(`/preview/${filename}`)
+            .then(response => response.json())
+            .then(data => {
+                if (data.error) {
+                    alert('Error previewing file: ' + data.error);
+                    return;
+                }
+
+                let html = `
+                    <div class="mb-2">
+                        <strong>File:</strong> ${data.filename} 
+                        <span class="badge bg-secondary">${data.total_rows} rows</span>
+                    </div>
+                    <div class="table-responsive">
+                        <table class="table table-sm table-striped">
+                            <thead class="table-dark">
+                                <tr>`;
+                
+                data.columns.forEach(col => {
+                    html += `<th>${col}</th>`;
+                });
+                
+                html += `</tr></thead><tbody>`;
+                
+                data.rows.forEach(row => {
+                    html += '<tr>';
+                    data.columns.forEach(col => {
+                        html += `<td>${row[col] || ''}</td>`;
+                    });
+                    html += '</tr>';
+                });
+                
+                html += '</tbody></table></div>';
+                
+                document.getElementById('previewContent').innerHTML = html;
+                previewSection.style.display = 'block';
+            })
+            .catch(error => {
+                alert('Error previewing file: ' + error);
+            });
+    });
+
+    // Generate report
+    generateForm.addEventListener('submit', function(e) {
+        e.preventDefault();
+        
+        const filename = csvSelect.value;
+        const debug = document.getElementById('debugMode').checked;
+        
+        if (!filename) {
+            alert('Please select a CSV file first');
+            return;
+        }
+
+        // Hide previous results/errors
+        resultsSection.style.display = 'none';
+        errorSection.style.display = 'none';
+        
+        // Show progress
+        progressContainer.style.display = 'block';
+        generateBtn.disabled = true;
+
+        // Start generation
+        const formData = new FormData();
+        formData.append('csv_file', filename);
+        formData.append('debug', debug);
+
+        fetch('/generate', {
+            method: 'POST',
+            body: formData
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.error) {
+                showError(data.error);
+                return;
+            }
+            
+            // Start polling for status
+            pollStatus();
+        })
+        .catch(error => {
+            showError('Error starting generation: ' + error);
+        });
+    });
+
+    function pollStatus() {
+        fetch('/status')
+            .then(response => response.json())
+            .then(data => {
+                updateProgress(data.progress, data.message);
+                
+                if (data.is_processing) {
+                    // Continue polling
+                    setTimeout(pollStatus, 1000);
+                } else if (data.error) {
+                    showError(data.error);
+                } else {
+                    // Success
+                    showResults(data.output_dir);
+                }
+            })
+            .catch(error => {
+                showError('Error checking status: ' + error);
+            });
+    }
+
+    function updateProgress(percent, message) {
+        document.getElementById('progressBar').style.width = percent + '%';
+        document.getElementById('progressPercent').textContent = percent + '%';
+        document.getElementById('progressMessage').textContent = message;
+    }
+
+    function showResults(outputDir) {
+        console.log('DEBUG: showResults called with outputDir:', outputDir);
+        progressContainer.style.display = 'none';
+        resultsSection.style.display = 'block';
+        generateBtn.disabled = false;
+        
+        // Set up open file button to point to HTML file
+        if (outputDir) {
+            const htmlUrl = `/download/${outputDir}/combined_map.html`;
+            console.log('DEBUG: Setting downloadBtn href to:', htmlUrl);
+            document.getElementById('downloadBtn').href = htmlUrl;
+            console.log('DEBUG: Open file button configured successfully');
+        } else {
+            console.log('DEBUG: No outputDir provided, open file button not configured');
+        }
+    }
+
+    function showError(message) {
+        progressContainer.style.display = 'none';
+        errorSection.style.display = 'block';
+        generateBtn.disabled = false;
+        document.getElementById('errorMessage').textContent = message;
+    }
+});
+</script>
+{% endblock %} 

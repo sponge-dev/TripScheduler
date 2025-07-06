@@ -1,0 +1,242 @@
+{% extends "base.html" %}
+
+{% block title %}Results - Location Visitation Scheduler{% endblock %}
+
+{% block content %}
+<div class="row">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header">
+                <h4 class="mb-0">
+                    <i class="fas fa-chart-bar me-2"></i>
+                    Generated Schedules
+                </h4>
+            </div>
+            <div class="card-body">
+                <div id="resultsContainer">
+                    <div class="text-center py-5">
+                        <i class="fas fa-folder-open fa-3x text-muted mb-3"></i>
+                        <h5 class="text-muted">No results available</h5>
+                        <p class="text-muted">Generate a schedule from the home page to see results here.</p>
+                        <a href="{{ url_for('index') }}" class="btn btn-primary">
+                            <i class="fas fa-arrow-left me-1"></i>
+                            Go to Home
+                        </a>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    loadAllResults();
+});
+
+function loadAllResults() {
+    // Get all available results from the backend
+    fetch('/results-data')
+        .then(response => response.json())
+        .then(data => {
+            if (data.results && data.results.length > 0) {
+                displayAllResults(data.results);
+            } else {
+                displayNoResults();
+            }
+        })
+        .catch(error => {
+            console.error('Error loading results:', error);
+            displayNoResults();
+        });
+}
+
+function formatDate(timestamp) {
+    const date = new Date(timestamp * 1000);
+    return date.toLocaleDateString() + ' ' + date.toLocaleTimeString();
+}
+
+function displayNoResults() {
+    const container = document.getElementById('resultsContainer');
+    container.innerHTML = `
+        <div class="text-center py-5">
+            <i class="fas fa-folder-open fa-3x text-muted mb-3"></i>
+            <h5 class="text-muted">No results available</h5>
+            <p class="text-muted">Generate a schedule from the home page to see results here.</p>
+            <a href="{{ url_for('index') }}" class="btn btn-primary">
+                <i class="fas fa-arrow-left me-1"></i>
+                Go to Home
+            </a>
+        </div>
+    `;
+}
+
+function displayAllResults(results) {
+    const container = document.getElementById('resultsContainer');
+    
+    let html = '<div class="row">';
+    
+    results.forEach((result, index) => {
+        const isLatest = index === 0;
+        const cardClass = isLatest ? 'border-primary' : '';
+        const headerClass = isLatest ? 'bg-primary text-white' : 'bg-light';
+        
+        html += `
+            <div class="col-12 mb-4">
+                <div class="card ${cardClass}">
+                    <div class="card-header ${headerClass}">
+                        <div class="d-flex justify-content-between align-items-center">
+                            <h5 class="mb-0">
+                                <i class="fas fa-folder me-2"></i>
+                                ${result.display_name}
+                                ${isLatest ? '<span class="badge bg-success ms-2">Latest</span>' : ''}
+                            </h5>
+                            <small class="${isLatest ? 'text-light' : 'text-muted'}">
+                                ${formatDate(result.modified)}
+                            </small>
+                        </div>
+                        <div class="mt-2">
+                            <small class="${isLatest ? 'text-light' : 'text-muted'}">
+                                ${result.location_count} locations • ${result.day_count} days
+                            </small>
+                        </div>
+                    </div>
+                    <div class="card-body">
+                        <div class="row">
+                            <div class="col-md-8">
+                                <div class="list-group list-group-flush">
+        `;
+        
+        if (result.has_combined) {
+            html += `
+                <a href="/download/${result.name}/combined_map.html" class="list-group-item list-group-item-action" target="_blank">
+                    <div class="d-flex w-100 justify-content-between">
+                        <h6 class="mb-1">
+                            <i class="fas fa-external-link-alt me-2"></i>
+                            Combined Interactive Schedule
+                        </h6>
+                        <small class="text-muted">HTML</small>
+                    </div>
+                    <p class="mb-1 small">Complete schedule with interactive map, driving directions, and all days</p>
+                </a>
+            `;
+        }
+        
+        if (result.has_complete_csv) {
+            html += `
+                <a href="/download/${result.name}/complete_location_schedule.csv" class="list-group-item list-group-item-action">
+                    <div class="d-flex w-100 justify-content-between">
+                        <h6 class="mb-1">
+                            <i class="fas fa-download me-2"></i>
+                            Complete Schedule Data
+                        </h6>
+                        <small class="text-muted">CSV</small>
+                    </div>
+                    <p class="mb-1 small">Download the complete schedule as CSV for spreadsheet use</p>
+                </a>
+            `;
+        }
+        
+        if (result.available_days.length > 0) {
+            html += `
+                <div class="list-group-item">
+                    <h6 class="mb-2">
+                        <i class="fas fa-calendar-day me-2"></i>
+                        Individual Days
+                    </h6>
+                    <div class="row">
+            `;
+            
+            result.available_days.forEach(day => {
+                const colClass = result.available_days.length <= 2 ? 'col-md-6' : 'col-md-4';
+                html += `
+                    <div class="${colClass}">
+                        <a href="/download/${result.name}/location_schedule_day_${day}.html" class="btn btn-outline-primary btn-sm me-2 mb-2" target="_blank">
+                            <i class="fas fa-external-link-alt me-1"></i>Day ${day} Schedule
+                        </a>
+                        <a href="/download/${result.name}/location_schedule_day_${day}.csv" class="btn btn-outline-secondary btn-sm mb-2">
+                            <i class="fas fa-download me-1"></i>Day ${day} CSV
+                        </a>
+                    </div>
+                `;
+            });
+            
+            html += `
+                    </div>
+                </div>
+            `;
+        }
+        
+        html += `
+                                </div>
+                            </div>
+                            <div class="col-md-4">
+                                <div class="card bg-light">
+                                    <div class="card-body">
+                                        <h6 class="card-title">
+                                            <i class="fas fa-info-circle me-2"></i>
+                                            Details
+                                        </h6>
+                                        <div class="small">
+                                            <div class="mb-1">
+                                                <strong>Locations:</strong> ${result.location_count}
+                                            </div>
+                                            <div class="mb-1">
+                                                <strong>Days:</strong> ${result.day_count}
+                                            </div>
+                                            <div class="mb-1">
+                                                <strong>Created:</strong> ${formatDate(result.created)}
+                                            </div>
+                                            <div class="mb-1">
+                                                <strong>Modified:</strong> ${formatDate(result.modified)}
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        `;
+    });
+    
+    html += '</div>';
+    
+    // Add action buttons at the bottom
+    html += `
+        <div class="row mt-4">
+            <div class="col-12">
+                <div class="card">
+                    <div class="card-header">
+                        <h6 class="mb-0">
+                            <i class="fas fa-plus me-2"></i>
+                            Create New Schedule
+                        </h6>
+                    </div>
+                    <div class="card-body">
+                        <p class="text-muted mb-3">
+                            Generate a new schedule with different settings or data.
+                        </p>
+                        <a href="{{ url_for('index') }}" class="btn btn-primary me-2">
+                            <i class="fas fa-plus me-1"></i>
+                            New Schedule
+                        </a>
+                        <a href="{{ url_for('config_page') }}" class="btn btn-outline-secondary">
+                            <i class="fas fa-cog me-1"></i>
+                            Settings
+                        </a>
+                    </div>
+                </div>
+            </div>
+        </div>
+    `;
+    
+    container.innerHTML = html;
+}
+
+
+</script>
+{% endblock %} 

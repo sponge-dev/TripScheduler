@@ -18,6 +18,12 @@ from colorama import init, Fore, Style
 import threading
 import itertools
 import argparse
+import re
+import webbrowser
+try:
+    import openrouteservice
+except ImportError:
+    openrouteservice = None
 
 init(autoreset=True)
 
@@ -47,17 +53,29 @@ class Spinner:
 
 # Colored output functions
 def print_info(msg):
-    print(f"{Fore.GREEN}{Style.BRIGHT}✓ {msg}{Style.RESET_ALL}")
+    try:
+        print(f"{Fore.GREEN}{Style.BRIGHT}✓ {msg}{Style.RESET_ALL}")
+    except UnicodeEncodeError:
+        print(f"{Fore.GREEN}{Style.BRIGHT}[OK] {msg}{Style.RESET_ALL}")
 
 def print_warning(msg):
-    print(f"{Fore.YELLOW}{Style.BRIGHT}⚠ {msg}{Style.RESET_ALL}")
+    try:
+        print(f"{Fore.YELLOW}{Style.BRIGHT}⚠ {msg}{Style.RESET_ALL}")
+    except UnicodeEncodeError:
+        print(f"{Fore.YELLOW}{Style.BRIGHT}[WARNING] {msg}{Style.RESET_ALL}")
 
 def print_error(msg):
-    print(f"{Fore.RED}{Style.BRIGHT}✗ {msg}{Style.RESET_ALL}")
+    try:
+        print(f"{Fore.RED}{Style.BRIGHT}✗ {msg}{Style.RESET_ALL}")
+    except UnicodeEncodeError:
+        print(f"{Fore.RED}{Style.BRIGHT}[ERROR] {msg}{Style.RESET_ALL}")
 
 def print_debug(msg):
     if DEBUG_MODE:
-        print(f"{Fore.BLUE}{Style.DIM}🔍 {msg}{Style.RESET_ALL}")
+        try:
+            print(f"{Fore.BLUE}{Style.DIM}🔍 {msg}{Style.RESET_ALL}")
+        except UnicodeEncodeError:
+            print(f"{Fore.BLUE}{Style.DIM}[DEBUG] {msg}{Style.RESET_ALL}")
 
 def print_header(msg):
     print(f"\n{Fore.MAGENTA}{Style.BRIGHT}{'='*50}")
@@ -107,6 +125,8 @@ def create_default_config():
         default_config = {
             "default_buffer_minutes": 30,
             "default_visit_hours": 1,
+            "min_start_time": "08:00",
+            "max_end_time": "22:00",
             "start_times": ["09:00", "09:00"],  # Fixed: use start_times array
             "visit_dates": ["July 16, 2024", "July 17, 2024"],
             "geocoding": {
@@ -214,7 +234,17 @@ def geocode_addresses(df, cache_file='geocode_cache.json', config=None):
     # Check for name column (apartment, event, location, name, etc.)
     for col in df.columns:
         col_lower = col.lower()
+        if 'unnamed' in col_lower:
+            continue  # Always skip unnamed columns
         if any(keyword in col_lower for keyword in ['apartment', 'event', 'location', 'name', 'venue', 'place']):
+            name_col = col
+            break
+    
+    # If no name column found, fallback to first non-unnamed column
+    if not name_col:
+        for col in df.columns:
+            if 'unnamed' in col.lower():
+                continue
             name_col = col
             break
     
@@ -253,8 +283,20 @@ def geocode_addresses(df, cache_file='geocode_cache.json', config=None):
             api_keys = json.load(f)
             api_key = api_keys.get('openai_api_key')
             if api_key and api_key != "your-openai-api-key-here":
-                openai_client = OpenAI(api_key=api_key)
-                print_info("OpenAI API key loaded successfully")
+                # Clean the key (remove any whitespace)
+                api_key = api_key.strip()
+                if DEBUG_MODE:
+                    masked = api_key[:4] + "..." + api_key[-4:]
+                    print_debug(f"Loaded OpenAI key: {masked} (length: {len(api_key)})")
+                    print_debug(f"Key starts with: '{api_key[:10]}...'")
+                    print_debug(f"Key ends with: '...{api_key[-10:]}'")
+                try:
+                    openai_client = OpenAI(api_key=api_key)
+                    print_info("OpenAI API key loaded successfully")
+                except Exception as e:
+                    print_warning(f"OpenAI API key test failed: {e}")
+                    print_warning("Disabling OpenAI functionality - will use Photon API fallback only")
+                    openai_client = None
             else:
                 print_warning("OpenAI API key not configured, reformatting will be disabled")
     except FileNotFoundError:
@@ -310,6 +352,7 @@ def geocode_addresses(df, cache_file='geocode_cache.json', config=None):
                     results.append({
                         'name': location_name,
                         'address': address,
+                        'original_address': address,
                         'price_info': price_info,
                         'latitude': lat,
                         'longitude': lon,
@@ -326,6 +369,7 @@ def geocode_addresses(df, cache_file='geocode_cache.json', config=None):
         location = None
         tried_addresses = set()
         photon_tried = False
+        original_address = address  # Store the original address
         
         for attempt in range(max_retries):
             try:
@@ -393,7 +437,7 @@ def geocode_addresses(df, cache_file='geocode_cache.json', config=None):
                 if DEBUG_MODE:
                     print_debug(f"Photon API also failed for: {address}")
         
-        # Cache the result (even if None)
+        # Cache the result (even if None) using the final address that was tried
         if location is not None and hasattr(location, 'latitude') and hasattr(location, 'longitude'):
             cache[address] = {
                 'lat': location.latitude,
@@ -401,18 +445,22 @@ def geocode_addresses(df, cache_file='geocode_cache.json', config=None):
             }
             if DEBUG_MODE:
                 print_debug(f"SUCCESS: Found coordinates for {address}: ({location.latitude}, {location.longitude})")
+            
+            # Use the successfully geocoded address (which may be different from original)
+            # This ensures the unlocated address detection works correctly
             results.append({
                 'name': location_name,
-                'address': address,
+                'address': address,  # Use the reformatted address that worked
+                'original_address': original_address,  # Keep track of the original for reference
                 'price_info': price_info,
                 'latitude': location.latitude,
                 'longitude': location.longitude,
                 'buffer_minutes': buffer_minutes
             })
         else:
-            cache[address] = None
+            cache[original_address] = None  # Cache the original address as None
             if DEBUG_MODE:
-                print_debug(f"SKIPPING: Failed to geocode {address} after {max_retries} attempts!")
+                print_debug(f"SKIPPING: Failed to geocode {original_address} after {max_retries} attempts!")
                 print_debug("Address appears to be invalid or not found in the database")
     
     spinner.stop()
@@ -424,7 +472,11 @@ def geocode_addresses(df, cache_file='geocode_cache.json', config=None):
     # Convert results to DataFrame
     if results:
         df_result = pd.DataFrame(results)
-        print_info(f"Successfully processed {len(df_result)} locations (skipped {len(df) - len(df_result)} invalid addresses)")
+        # Count actual unlocated addresses by comparing original addresses with geocoded ones
+        original_addresses = set(df[address_col].tolist())
+        geocoded_addresses = set(df_result['address'].tolist())
+        unlocated_count = len(original_addresses - geocoded_addresses)
+        print_info(f"Successfully processed {len(df_result)} locations (skipped {unlocated_count} invalid addresses)")
         return df_result
     else:
         print_error("No addresses were successfully geocoded!")
@@ -433,8 +485,10 @@ def geocode_addresses(df, cache_file='geocode_cache.json', config=None):
 def reformat_address_with_openai(address, client):
     """Reformat address using OpenAI for better geocoding success."""
     try:
+        if DEBUG_MODE:
+            print_debug(f"Making OpenAI API call to reformat: {address}")
         response = client.chat.completions.create(
-            model="gpt-3.5-turbo",
+            model="gpt-4o",
             messages=[
                 {"role": "system", "content": "You are an address formatting expert. Reformulate the given address to be more geocoding-friendly while preserving the essential location information."},
                 {"role": "user", "content": f"Please reformat this address for better geocoding: {address}"}
@@ -442,11 +496,275 @@ def reformat_address_with_openai(address, client):
             max_tokens=100,
             temperature=0.3
         )
-        return response.choices[0].message.content.strip()
+        result = response.choices[0].message.content.strip()
+        if DEBUG_MODE:
+            print_debug(f"OpenAI reformatting successful: {address} -> {result}")
+        return result
     except Exception as e:
         if DEBUG_MODE:
-            print_debug(f"OpenAI reformatting failed: {e}")
+            print_debug(f"OpenAI reformatting failed: {type(e).__name__}: {e}")
+            if hasattr(e, 'response') and hasattr(e.response, 'json'):
+                try:
+                    error_detail = e.response.json()
+                    print_debug(f"OpenAI API error details: {error_detail}")
+                except:
+                    pass
         return None
+
+# OpenRouteService functions
+def load_ors_client(config=None):
+    """Load OpenRouteService client with API key."""
+    if config is None:
+        config = load_config()
+    
+    # Check if openrouteservice is available
+    if openrouteservice is None:
+        if DEBUG_MODE:
+            print_debug("openrouteservice package not available")
+        return None
+    
+    # Check if ORS is enabled in config
+    if not config.get('ors', {}).get('enabled', True):
+        if DEBUG_MODE:
+            print_debug("ORS is disabled in config")
+        return None
+    
+    try:
+        with open('api_keys.json', 'r') as f:
+            api_keys = json.load(f)
+            ors_api_key = api_keys.get('ors_api_key')
+            if ors_api_key and ors_api_key != "your-openrouteservice-api-key-here":
+                # Clean the key (remove any whitespace)
+                ors_api_key = ors_api_key.strip()
+                try:
+                    client = openrouteservice.Client(key=ors_api_key)
+                    if DEBUG_MODE:
+                        print_debug("ORS client loaded successfully")
+                    print_info("OpenRouteService API key loaded successfully")
+                    return client
+                except Exception as e:
+                    print_warning(f"ORS API key test failed: {e}")
+                    print_warning("Disabling ORS functionality - will use estimated travel times")
+                    return None
+            else:
+                print_warning("ORS API key not configured, real driving times will be disabled")
+                return None
+    except FileNotFoundError:
+        print_warning("Warning: api_keys.json not found. ORS functionality will be disabled.")
+        return None
+    except KeyError:
+        print_warning("Warning: ors_api_key not found in api_keys.json. ORS functionality will be disabled.")
+        return None
+    except Exception as e:
+        print_warning(f"Warning: Error loading ORS API key: {e}. ORS functionality will be disabled.")
+        return None
+
+def get_ors_route_info(client, coords_list, config=None):
+    """Get route information including duration and distance from ORS."""
+    if not client or len(coords_list) < 2:
+        return None
+    
+    if config is None:
+        config = load_config()
+    
+    ors_config = config.get('ors', {})
+    profile = ors_config.get('profile', 'driving-car')
+    
+    try:
+        # Convert coordinates to [lon, lat] format for ORS
+        ors_coords = [[coord[1], coord[0]] for coord in coords_list]
+        
+        # Get route information
+        route = client.directions(
+            coordinates=ors_coords,
+            profile=profile,
+            format='geojson',
+            instructions=True
+        )
+        
+        if route and 'features' in route and len(route['features']) > 0:
+            properties = route['features'][0]['properties']
+            
+            # Extract route information
+            duration_seconds = properties.get('summary', {}).get('duration', 0)
+            distance_meters = properties.get('summary', {}).get('distance', 0)
+            
+            # Get turn-by-turn directions
+            segments = properties.get('segments', [])
+            directions = []
+            for segment in segments:
+                for step in segment.get('steps', []):
+                    instruction = step.get('instruction', '')
+                    if instruction:
+                        directions.append(instruction)
+            
+            return {
+                'duration_seconds': duration_seconds,
+                'duration_minutes': duration_seconds / 60,
+                'distance_meters': distance_meters,
+                'distance_km': distance_meters / 1000,
+                'directions': directions,
+                'route_geometry': route['features'][0]['geometry']
+            }
+    except Exception as e:
+        if DEBUG_MODE:
+            print_debug(f"ORS route request failed: {e}")
+        return None
+    
+    return None
+
+def calculate_ors_travel_times(df, config=None, cache_file='ors_cache.json'):
+    """Calculate travel times between consecutive locations using ORS with caching."""
+    if config is None:
+        config = load_config()
+    
+    ors_client = load_ors_client(config)
+    if not ors_client:
+        print_warning("ORS client not available, using estimated travel times")
+        return df
+    
+    # Load ORS cache if exists
+    if os.path.exists(cache_file):
+        with open(cache_file, 'r', encoding='utf-8') as f:
+            ors_cache = json.load(f)
+    else:
+        ors_cache = {}
+    
+    print_info("Calculating travel times using OpenRouteService...")
+    spinner = Spinner("Calculating travel times")
+    spinner.start()
+    
+    # Add columns for ORS data
+    df['ors_travel_time_minutes'] = 0
+    df['ors_travel_distance_km'] = 0
+    df['ors_directions'] = ''
+    df['ors_route_geometry'] = ''
+    
+    ors_config = config.get('ors', {})
+    rate_limit_delay = ors_config.get('rate_limit_delay', 0.5)
+    
+    try:
+        # Process each cluster separately
+        for cluster_id in df['cluster'].unique():
+            cluster_data = df[df['cluster'] == cluster_id].copy()
+            
+            if len(cluster_data) < 2:
+                continue
+                
+            # Get coordinates for this cluster in route order
+            coords = []
+            indices = []
+            for idx, row in cluster_data.iterrows():
+                coords.append([row['latitude'], row['longitude']])
+                indices.append(idx)
+            
+            # Calculate travel times between consecutive locations
+            for i in range(len(coords) - 1):
+                current_coords = [coords[i], coords[i + 1]]
+                
+                # Create cache key from coordinates
+                cache_key = f"{current_coords[0][0]:.6f},{current_coords[0][1]:.6f}_to_{current_coords[1][0]:.6f},{current_coords[1][1]:.6f}_{ors_config.get('profile', 'driving-car')}"
+                
+                # Check cache first
+                route_info = None
+                if cache_key in ors_cache:
+                    route_info = ors_cache[cache_key]
+                    if DEBUG_MODE:
+                        print_debug(f"Using cached ORS data for route segment")
+                else:
+                    # Get route info from ORS API
+                    route_info = get_ors_route_info(ors_client, current_coords, config)
+                    if route_info:
+                        # Cache the result
+                        ors_cache[cache_key] = route_info
+                        if DEBUG_MODE:
+                            print_debug(f"Cached ORS data for route segment")
+                    
+                    # Rate limiting only when making API calls
+                    time.sleep(rate_limit_delay)
+                
+                if route_info:
+                    # Store the travel time to reach the next location
+                    next_idx = indices[i + 1]
+                    df.at[next_idx, 'ors_travel_time_minutes'] = route_info['duration_minutes']
+                    df.at[next_idx, 'ors_travel_distance_km'] = route_info['distance_km']
+                    df.at[next_idx, 'ors_directions'] = json.dumps(route_info['directions'])
+                    df.at[next_idx, 'ors_route_geometry'] = json.dumps(route_info['route_geometry'])
+                    
+                    if DEBUG_MODE:
+                        print_debug(f"Travel time to {df.at[next_idx, 'name']}: {route_info['duration_minutes']:.1f} min, {route_info['distance_km']:.1f} km")
+                
+    except Exception as e:
+        print_error(f"Error calculating ORS travel times: {e}")
+    finally:
+        spinner.stop()
+        
+        # Save ORS cache
+        try:
+            with open(cache_file, 'w', encoding='utf-8') as f:
+                json.dump(ors_cache, f, indent=2)
+            if DEBUG_MODE:
+                print_debug(f"ORS cache saved to {cache_file}")
+        except Exception as e:
+            if DEBUG_MODE:
+                print_debug(f"Error saving ORS cache: {e}")
+    
+    return df
+
+def validate_schedule_with_ors(schedule_df, df, config=None):
+    """Validate that the schedule fits within time constraints using ORS travel times."""
+    if config is None:
+        config = load_config()
+    
+    ors_config = config.get('ors', {})
+    if not ors_config.get('use_for_validation', True):
+        return schedule_df, []
+    
+    # Check if ORS client is available
+    ors_client = load_ors_client(config)
+    if not ors_client:
+        if DEBUG_MODE:
+            print_debug("ORS client not available, skipping schedule validation")
+        return schedule_df, []
+    
+    warnings = []
+    
+    # Check each day's schedule
+    for cluster_name in schedule_df['Cluster'].unique():
+        day_schedule = schedule_df[schedule_df['Cluster'] == cluster_name].copy()
+        
+        if len(day_schedule) < 2:
+            continue
+            
+        # Get the cluster ID from the cluster name
+        cluster_id = int(cluster_name.split()[-1]) - 1
+        
+        # Check if actual travel times exceed buffer times
+        for i in range(len(day_schedule) - 1):
+            current_visit = day_schedule.iloc[i]
+            next_visit = day_schedule.iloc[i + 1]
+            
+            # Find the corresponding entries in the main DataFrame
+            current_match = df[(df['name'] == current_visit['Location']) & 
+                             (df['address'] == current_visit['Address'])]
+            next_match = df[(df['name'] == next_visit['Location']) & 
+                          (df['address'] == next_visit['Address'])]
+            
+            if not current_match.empty and not next_match.empty:
+                next_row = next_match.iloc[0]
+                ors_travel_time = next_row.get('ors_travel_time_minutes', 0)
+                
+                # Parse buffer time from schedule
+                buffer_str = next_visit.get('Buffer Time', '0 minutes')
+                buffer_minutes = int(buffer_str.split()[0]) if buffer_str.split() else 0
+                
+                if ors_travel_time > buffer_minutes:
+                    warning = f"Day {cluster_id + 1}: Travel time to {next_visit['Location']} ({ors_travel_time:.1f} min) exceeds buffer time ({buffer_minutes} min)"
+                    warnings.append(warning)
+                    if DEBUG_MODE:
+                        print_debug(warning)
+    
+    return schedule_df, warnings
 
 def cluster_locations(df, n_clusters=2):
     """Cluster locations into multiple days using K-means."""
@@ -528,7 +846,10 @@ def optimize_routes(df):
             route = nearest_neighbor_route(coords)
             
             # Reorder cluster data according to route
-            cluster_data = cluster_data.iloc[route].reset_index(drop=True)
+            # Use .iloc to get the actual data rows, not the original indices
+            cluster_data = cluster_data.iloc[route].copy()
+            # Reset index to ensure clean indexing
+            cluster_data = cluster_data.reset_index(drop=True)
         
         optimized_df = pd.concat([optimized_df, cluster_data], ignore_index=True)
     
@@ -547,9 +868,15 @@ def create_schedule(df, config=None):
     start_times = config.get('start_times', ["09:00", "09:00"])
     visit_hours = config.get('default_visit_hours', 1)
     
+    # Get time constraints as arrays
+    max_end_times = config.get('max_end_times', ['22:00', '22:00'])
+    
     for cluster_id in df['cluster'].dropna().unique():
         cluster_data = df[df['cluster'] == cluster_id].copy()
         date = dates[int(cluster_id)]
+        
+        # Get time constraints for this day
+        max_end_time = datetime.strptime(max_end_times[int(cluster_id)], '%H:%M')
         
         # Start time for each day
         current_time = datetime.strptime(start_times[int(cluster_id)], '%H:%M')
@@ -558,8 +885,14 @@ def create_schedule(df, config=None):
             # Get custom buffer time for this location, or use default
             buffer_minutes = row.get('buffer_minutes', config.get('default_buffer_minutes', 30))
             
-            # Add visit duration for the visit
+            # Calculate end time for this visit
             end_time = current_time + timedelta(hours=visit_hours)
+            
+            # Check if this visit would exceed max end time for this day
+            if end_time > max_end_time:
+                if DEBUG_MODE:
+                    print_debug(f"Skipping {row['name']} - would end at {end_time.strftime('%I:%M %p')} which is after max end time {max_end_time.strftime('%I:%M %p')} for day {int(cluster_id) + 1}")
+                continue
             
             schedule.append({
                 'Date': date,
@@ -576,94 +909,187 @@ def create_schedule(df, config=None):
     
     return pd.DataFrame(schedule)
 
-def suggest_times_for_unlocated(df_located, unlocated_df, config=None):
-    """Suggest times for unlocated addresses using OpenAI or algorithm, always at the end of the day."""
+def suggest_visit_times_for_unlocated(unlocated_df, schedule_df, config=None):
+    """Suggest visit times for unlocated addresses using OpenAI with ORS context."""
     if config is None:
         config = load_config()
     
-    # Try to use OpenAI first
-    try:
-        api_keys_file = 'api_keys.json'
-        if os.path.exists(api_keys_file):
-            with open(api_keys_file, 'r') as f:
-                api_keys = json.load(f)
-                openai_key = api_keys.get('openai_api_key')
-                
-            if openai_key:
-                client = OpenAI(api_key=openai_key)
-                
-                # Create context from located addresses
-                context = "Based on these located addresses and their scheduled times (do not output these, just use for context):\n"
-                for _, row in df_located.iterrows():
-                    context += f"- {row['name']}: {row['address']} (Day {row['cluster'] + 1})\n"
-                
-                context += "\nPlease suggest visit times for these unlocated addresses, placing them at the end of the day after all other visits. Only output the unlocated addresses, their suggested times, and the day. Do NOT output the full schedule.\n"
-                context += "Unlocated addresses:\n"
-                
-                for _, row in unlocated_df.iterrows():
-                    context += f"- {row['name']}: {row['address']}\n"
-                
-                context += "\nRespond ONLY with the suggested times in this format (one per line):\n"
-                context += "Day 1: [time] - [location name]\nDay 2: [time] - [location name]\n"
-                
-                try:
-                    spinner = Spinner("Generating OpenAI suggestions")
-                    spinner.start()
-                    response = client.chat.completions.create(
-                        model="gpt-3.5-turbo",
-                        messages=[
-                            {"role": "system", "content": "You are a scheduling assistant that suggests optimal visit times for locations."},
-                            {"role": "user", "content": context}
-                        ],
-                        max_tokens=500,
-                        temperature=0.3
-                    )
-                    spinner.stop()
-                    suggestions = response.choices[0].message.content
-                    if suggestions:
-                        return suggestions.strip()
-                except Exception as e:
-                    spinner.stop()
-                    print_warning(f"OpenAI API error: {e}")
-    except Exception as e:
-        print_warning(f"Error with OpenAI integration: {e}")
+    if unlocated_df.empty:
+        return ""
     
-    # Algorithm-based time suggestion: always at the end of the day
+    # Get time constraints as arrays
+    max_end_times = config.get('max_end_times', ['22:00', '22:00'])
+    start_times = config.get('start_times', ['09:00', '09:00'])
     dates = config.get('visit_dates', ['July 16, 2024', 'July 17, 2024'])
-    start_times = config.get('start_times', ["09:00", "09:00"])
-    visit_hours = config.get('default_visit_hours', 1)
-    buffer_minutes = config.get('default_buffer_minutes', 30)
+    visit_hours = config.get('default_visit_hours', 0.75)
+    buffer_minutes = config.get('default_buffer_minutes', 15)
+    n_clusters = config.get('clustering', {}).get('n_clusters', 2)
     
-    # Calculate end times for each day (after all located visits)
+    # Calculate the actual end time of each day's schedule
     day_end_times = {}
-    for cluster_id in df_located['cluster'].unique():
-        cluster_data = df_located[df_located['cluster'] == cluster_id]
-        if len(cluster_data) > 0:
-            last_time = datetime.strptime(start_times[cluster_id], '%H:%M')
-            for _, row in cluster_data.iterrows():
-                last_time += timedelta(hours=visit_hours)
-                last_time += timedelta(minutes=row.get('buffer_minutes', buffer_minutes))
-            day_end_times[cluster_id] = last_time
+    for day_idx in range(n_clusters):
+        # Get all scheduled visits for this day
+        day_schedule = schedule_df[schedule_df['Cluster'] == f"Day {day_idx + 1}"]
+        
+        if len(day_schedule) > 0:
+            # Find the latest end time from the schedule
+            latest_end_time = None
+            for _, visit in day_schedule.iterrows():
+                # Parse the time range (e.g., "09:00 AM - 10:00 AM")
+                time_range = visit['Time']
+                if ' - ' in time_range:
+                    end_time_str = time_range.split(' - ')[1]
+                    try:
+                        # Parse time like "10:00 AM" to datetime
+                        end_time = datetime.strptime(end_time_str, '%I:%M %p')
+                        if latest_end_time is None or end_time > latest_end_time:
+                            latest_end_time = end_time
+                    except:
+                        pass
+            
+            # If we found a latest end time, add buffer to get the next available slot
+            if latest_end_time:
+                day_end_times[day_idx] = latest_end_time + timedelta(minutes=buffer_minutes)
+            else:
+                # Fallback to start time
+                day_end_times[day_idx] = datetime.strptime(start_times[day_idx], '%H:%M')
         else:
-            day_end_times[cluster_id] = datetime.strptime(start_times[cluster_id], '%H:%M')
+            # No scheduled visits for this day, use start time
+            day_end_times[day_idx] = datetime.strptime(start_times[day_idx], '%H:%M')
     
-    # Distribute unlocated addresses across days, always at the end
+    # Try to use OpenAI for intelligent suggestions
+    try:
+        with open('api_keys.json', 'r') as f:
+            api_keys = json.load(f)
+            openai_api_key = api_keys.get('openai_api_key')
+            if openai_api_key and openai_api_key != "your-openai-api-key-here":
+                openai_client = OpenAI(api_key=openai_api_key.strip())
+                
+                # Build context for OpenAI
+                schedule_context = "Current Schedule:\n"
+                for day_idx in range(n_clusters):
+                    day_schedule = schedule_df[schedule_df['Cluster'] == f"Day {day_idx + 1}"]
+                    schedule_context += f"\nDay {day_idx + 1} ({dates[day_idx]}):\n"
+                    schedule_context += f"  Start: {start_times[day_idx]}, End: {max_end_times[day_idx]}\n"
+                    schedule_context += f"  Next available: {day_end_times[day_idx].strftime('%I:%M %p')}\n"
+                    if len(day_schedule) > 0:
+                        schedule_context += "  Scheduled visits:\n"
+                        for _, visit in day_schedule.iterrows():
+                            schedule_context += f"    - {visit['Time']}: {visit['Location']}\n"
+                    else:
+                        schedule_context += "  No visits scheduled\n"
+                
+                # Add ORS context if available
+                ors_context = ""
+                ors_client = load_ors_client(config)
+                if ors_client:
+                    ors_context = "\nTravel Time Considerations:\n"
+                    ors_context += "- Real driving times are calculated using OpenRouteService\n"
+                    ors_context += "- Consider traffic patterns and actual road distances\n"
+                    ors_context += "- Buffer times should account for real travel times\n"
+                else:
+                    ors_context = "\nTravel Time Considerations:\n"
+                    ors_context += "- Using estimated travel times (ORS not available)\n"
+                    ors_context += "- Consider adding buffer time for traffic and road conditions\n"
+                
+                # Build prompt for unlocated addresses
+                unlocated_list = []
+                for _, row in unlocated_df.iterrows():
+                    location_name = row.get('Apartment', row.get('name', 'Unknown Location'))
+                    unlocated_list.append(f"{location_name}: {row['address']}")
+                
+                prompt = f"""You are a scheduling assistant. Given the current schedule and unlocated addresses, suggest optimal visit times.
+
+{schedule_context}
+{ors_context}
+
+Unlocated Addresses:
+{chr(10).join(unlocated_list)}
+
+Constraints:
+- Each visit takes {visit_hours} hours
+- Buffer time between visits: {buffer_minutes} minutes
+- Consider real travel times and traffic patterns
+- Place addresses at the end of existing schedules when possible
+- If a day is full, suggest the next available day
+
+For each unlocated address, respond with ONLY the time in format:
+"Day X (Date): HH:MM AM/PM - Location Name"
+
+If impossible to schedule within constraints, respond with:
+"Day X (Date): Impossible to schedule within allowed time - Location Name"
+"""
+                
+                response = openai_client.chat.completions.create(
+                    model="gpt-4o",
+                    messages=[
+                        {"role": "system", "content": "You are a scheduling assistant. Provide concise, properly formatted time suggestions."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    max_tokens=500,
+                    temperature=0.3
+                )
+                
+                ai_suggestions = response.choices[0].message.content.strip()
+                if ai_suggestions:
+                    return ai_suggestions
+                    
+    except Exception as e:
+        if DEBUG_MODE:
+            print_debug(f"OpenAI suggestion failed: {e}")
+    
+    # Fallback to algorithmic suggestions
     suggestions = []
-    unlocated_count = len(unlocated_df)
-    n_days = len(dates)
-    # Assign unlocated addresses to days in round-robin, but always after all located visits
-    for i, (_, row) in enumerate(unlocated_df.iterrows()):
-        day_choice = i % n_days
-        cluster_id = day_choice
-        suggested_time = day_end_times.get(cluster_id, datetime.strptime(start_times[cluster_id], '%H:%M'))
-        end_time = suggested_time + timedelta(hours=visit_hours)
-        time_str = f"{suggested_time.strftime('%I:%M %p')} - {end_time.strftime('%I:%M %p')}"
-        suggestions.append(f"Day {cluster_id + 1} ({dates[cluster_id]}): {time_str} - {row['name']}")
-        # Update end time for next unlocated on this day
-        day_end_times[cluster_id] = end_time + timedelta(minutes=buffer_minutes)
+    
+    for _, row in unlocated_df.iterrows():
+        location_name = row.get('Apartment', row.get('name', 'Unknown Location'))
+        full_label = f"{location_name}: {row['address']}"
+        
+        # Find the best day for this address
+        best_day = None
+        best_time = None
+        impossible_all_days = True
+        
+        for day_idx in range(n_clusters):
+            start_time = start_times[day_idx]
+            max_end_time = max_end_times[day_idx]
+            date = dates[day_idx]
+            current_time = day_end_times[day_idx]
+            
+            # Check if we can fit this visit on this day
+            visit_end_time = current_time + timedelta(hours=visit_hours)
+            max_end_dt = datetime.strptime(max_end_time, '%H:%M')
+            
+            if visit_end_time <= max_end_dt:
+                # This day works!
+                best_day = day_idx
+                best_time = current_time
+                impossible_all_days = False
+                break
+        
+        if impossible_all_days:
+            # Try to find any day with some time available, even if it's at the very end
+            for day_idx in range(n_clusters):
+                max_end_dt = datetime.strptime(max_end_times[day_idx], '%H:%M')
+                if day_end_times[day_idx] < max_end_dt:
+                    best_day = day_idx
+                    best_time = max_end_dt - timedelta(hours=visit_hours)
+                    impossible_all_days = False
+                    break
+        
+        if best_day is not None:
+            date = dates[best_day]
+            if impossible_all_days:
+                suggestions.append(f"Day {best_day + 1} ({date}): Impossible to schedule within allowed time - {full_label}")
+            else:
+                suggestions.append(f"Day {best_day + 1} ({date}): {best_time.strftime('%I:%M %p')} - {full_label}")
+        else:
+            # No days available at all
+            suggestions.append(f"All Days: Impossible to schedule within allowed time - {full_label}")
+    
     return "\n".join(suggestions)
 
-def create_side_by_side_schedule_html(schedule_df):
+def create_side_by_side_schedule_html(schedule_df, df=None):
     """Create HTML for schedule with days displayed side by side."""
     # Group by date
     dates = schedule_df['Date'].unique()
@@ -679,7 +1105,30 @@ def create_side_by_side_schedule_html(schedule_df):
             <div class="day-header">{date}</div>
         """
         
-        for _, visit in day_data.iterrows():
+        for idx, visit in day_data.iterrows():
+            # Find driving info to next location if available
+            driving_info = ""
+            if df is not None and idx < len(day_data) - 1:
+                # Find the corresponding entry in the main DataFrame for the NEXT location
+                next_visit = day_data.iloc[list(day_data.index).index(idx) + 1]
+                next_match = df[(df['name'] == next_visit['Location']) & 
+                               (df['address'] == next_visit['Address'])]
+                
+                if not next_match.empty:
+                    next_row = next_match.iloc[0]
+                    travel_time = next_row.get('ors_travel_time_minutes', 0)
+                    travel_distance = next_row.get('ors_travel_distance_km', 0)
+                    
+                    if travel_time > 0 and travel_distance > 0:
+                        driving_info = f"""
+                        <div class="visit-driving-info">
+                            <i class="fas fa-route text-primary"></i>
+                            <small class="text-primary">
+                                Next: {travel_distance:.1f} km, {travel_time:.0f} min drive
+                            </small>
+                        </div>
+                        """
+            
             day_html += f"""
             <div class="visit-item">
                 <div class="visit-time">{visit['Time']}</div>
@@ -687,6 +1136,7 @@ def create_side_by_side_schedule_html(schedule_df):
                 <div class="visit-address">{visit['Address']}</div>
                 <div class="visit-price">{visit['Price/Cost']}</div>
                 <small class="text-muted">Buffer: {visit['Buffer Time']}</small>
+                {driving_info}
             </div>
             """
         
@@ -762,33 +1212,87 @@ def generate_html_output(df, schedule_df, output_dir, filename='location_schedul
     # Color scheme for clusters
     colors = ['red', 'blue']
     
-    # Add markers to the map
-    for idx, row in df.iterrows():
-        cluster_id = row['cluster']
+    # Add markers and routes to the map
+    for cluster_id in df['cluster'].unique():
         if pd.isna(cluster_id):
-            color = 'gray'
-        else:
-            color = colors[int(cluster_id)]
+            continue
+            
+        cluster_data = df[df['cluster'] == cluster_id].copy()
+        cluster_data = cluster_data.sort_index()  # Maintain route order
+        color = colors[int(cluster_id)]
+        route_coordinates = []
         
-        popup_text = f"""
-        <b>{row['name']}</b><br>
-        Address: {row['address']}<br>
-        Price/Cost: {row['price_info']}<br>
-        Day: {int(cluster_id) + 1 if not pd.isna(cluster_id) else 'N/A'}
-        """
+        # Add markers
+        for idx, row in cluster_data.iterrows():
+            route_coordinates.append([row['latitude'], row['longitude']])
+            
+            popup_text = f"""
+            <b>{row['name']}</b><br>
+            Address: {row['address']}<br>
+            Price/Cost: {row['price_info']}<br>
+            Day: {int(cluster_id) + 1}
+            """
+            
+            folium.Marker(
+                [row['latitude'], row['longitude']],
+                popup=folium.Popup(popup_text, max_width=300),
+                tooltip=f"{row['name']} (Day {int(cluster_id) + 1})",
+                icon=folium.Icon(color=color, icon='home')
+            ).add_to(m)
         
-        folium.Marker(
-            [row['latitude'], row['longitude']],
-            popup=folium.Popup(popup_text, max_width=300),
-            tooltip=f"{row['name']} (Day {int(cluster_id) + 1 if not pd.isna(cluster_id) else 'N/A'})",
-            icon=folium.Icon(color=color, icon='home')
-        ).add_to(m)
+        # Add route lines between consecutive locations
+        if len(route_coordinates) > 1:
+            for i in range(len(cluster_data) - 1):
+                current_row = cluster_data.iloc[i]
+                next_row = cluster_data.iloc[i + 1]
+                route_geometry_json = next_row.get('ors_route_geometry', '')
+                
+                try:
+                    if route_geometry_json:
+                        route_geometry = json.loads(route_geometry_json)
+                        if route_geometry and 'coordinates' in route_geometry:
+                            # Convert ORS coordinates [lon, lat] to folium format [lat, lon]
+                            route_coords = [[coord[1], coord[0]] for coord in route_geometry['coordinates']]
+                            folium.PolyLine(
+                                locations=route_coords,
+                                color=color,
+                                weight=3,
+                                opacity=0.8,
+                                popup=f"Route: {current_row['name']} → {next_row['name']}"
+                            ).add_to(m)
+                        else:
+                            # Fallback to straight line
+                            folium.PolyLine(
+                                locations=[route_coordinates[i], route_coordinates[i + 1]],
+                                color=color,
+                                weight=2,
+                                opacity=0.6,
+                                popup=f"Route: {current_row['name']} → {next_row['name']}"
+                            ).add_to(m)
+                    else:
+                        # No route geometry, use straight line
+                        folium.PolyLine(
+                            locations=[route_coordinates[i], route_coordinates[i + 1]],
+                            color=color,
+                            weight=2,
+                            opacity=0.6,
+                            popup=f"Route: {current_row['name']} → {next_row['name']}"
+                        ).add_to(m)
+                except (json.JSONDecodeError, KeyError, IndexError):
+                    # Error parsing route geometry, use straight line
+                    folium.PolyLine(
+                        locations=[route_coordinates[i], route_coordinates[i + 1]],
+                        color=color,
+                        weight=2,
+                        opacity=0.6,
+                        popup=f"Route: {current_row['name']} → {next_row['name']}"
+                    ).add_to(m)
     
     # Convert map to HTML
     map_html = m._repr_html_()
     
     # Create schedule HTML with days side by side
-    schedule_html = create_side_by_side_schedule_html(schedule_df)
+    schedule_html = create_side_by_side_schedule_html(schedule_df, df)
     
     # Load and render template
     template_content = load_html_template()
@@ -808,54 +1312,216 @@ def generate_html_output(df, schedule_df, output_dir, filename='location_schedul
     
     print_info(f"HTML output saved to {output_path}")
 
-def generate_combined_html_output(df, schedule_df, output_dir, filename='location_schedule_combined.html', unlocated_df=None, unlocated_suggestions=None):
-    """Generate HTML output with map and combined schedule showing all days side by side."""
+def prepare_directions_data(df, schedule_df, config=None):
+    """Prepare directions data for HTML template."""
+    if config is None:
+        config = load_config()
     
+    ors_config = config.get('ors', {})
+    if not ors_config.get('show_directions', True):
+        return {}, ""
+    
+    # Check if ORS client is available
+    ors_client = load_ors_client(config)
+    if not ors_client:
+        if DEBUG_MODE:
+            print_debug("ORS client not available, skipping directions data preparation")
+        return {}, ""
+    
+    directions_data = {}
+    day_options = ""
+    
+    # Process each day
+    for day_idx, date in enumerate(schedule_df['Date'].unique()):
+        day_name = f"day{day_idx + 1}"
+        day_schedule = schedule_df[schedule_df['Date'] == date].reset_index(drop=True)
+        day_options += f'<option value="{day_name}">Day {day_idx + 1} ({date})</option>'
+        
+        if len(day_schedule) < 2:
+            directions_data[day_name] = {
+                'routes': [],
+                'totalDistance': 0,
+                'totalTime': 0
+            }
+            continue
+        
+        routes = []
+        total_distance = 0
+        total_time = 0
+        
+        # Get route information between consecutive locations
+        for i in range(len(day_schedule) - 1):
+            current_visit = day_schedule.iloc[i]
+            next_visit = day_schedule.iloc[i + 1]
+            
+            # Find the corresponding entries in the main DataFrame
+            current_match = df[(df['name'] == current_visit['Location']) & 
+                             (df['address'] == current_visit['Address'])]
+            next_match = df[(df['name'] == next_visit['Location']) & 
+                          (df['address'] == next_visit['Address'])]
+            
+            if not current_match.empty and not next_match.empty:
+                next_row = next_match.iloc[0]
+                
+                # Get ORS data
+                travel_time = next_row.get('ors_travel_time_minutes', 0)
+                travel_distance = next_row.get('ors_travel_distance_km', 0)
+                directions_json = next_row.get('ors_directions', '[]')
+                
+                try:
+                    directions_list = json.loads(directions_json) if directions_json else []
+                except:
+                    directions_list = []
+                
+                route_info = {
+                    'from': current_visit['Location'],
+                    'to': next_visit['Location'],
+                    'distance': f"{travel_distance:.1f}",
+                    'duration': f"{travel_time:.0f}",
+                    'directions': directions_list
+                }
+                
+                routes.append(route_info)
+                total_distance += travel_distance
+                total_time += travel_time
+        
+        directions_data[day_name] = {
+            'routes': routes,
+            'totalDistance': f"{total_distance:.1f}",
+            'totalTime': f"{total_time:.0f}"
+        }
+    
+    return directions_data, day_options
+
+def generate_combined_html_output(df, schedule_df, output_dir, filename='location_schedule_combined.html', unlocated_df=None, unlocated_suggestions=None):
+    """Generate combined HTML output with map and schedule side by side."""
     # Create the map
     center_lat = df['latitude'].mean()
     center_lon = df['longitude'].mean()
+    
+    # Create a map centered on the data
     m = folium.Map(location=[center_lat, center_lon], zoom_start=12)
     
     # Color scheme for clusters
-    colors = ['red', 'blue']
-    
-    # Add markers to the map
-    for idx, row in df.iterrows():
-        cluster_id = row['cluster']
-        if pd.isna(cluster_id):
-            color = 'gray'
-        else:
-            color = colors[int(cluster_id)]
+    colors = ['red', 'blue', 'green', 'purple', 'orange', 'darkred', 'lightred', 'beige', 'darkblue', 'darkgreen', 'cadetblue', 'darkpurple', 'white', 'pink', 'lightblue', 'lightgreen', 'gray', 'black', 'lightgray']
+
+    # For each day, get the route order from schedule_df and add markers and routes
+    for day_idx, date in enumerate(schedule_df['Date'].unique()):
+        day_schedule = schedule_df[schedule_df['Date'] == date].reset_index(drop=True)
+        route_coordinates = []
         
-        popup_text = f"""
-        <b>{row['name']}</b><br>
-        Address: {row['address']}<br>
-        Price/Cost: {row['price_info']}<br>
-        Day: {int(cluster_id) + 1 if not pd.isna(cluster_id) else 'N/A'}
-        """
+        for order, visit in day_schedule.iterrows():
+            match = df[(df['name'] == visit['Location']) & (df['address'] == visit['Address'])]
+            if not match.empty:
+                row = match.iloc[0]
+                cluster_id = row['cluster'] if not pd.isna(row['cluster']) else 0
+                color = colors[int(cluster_id) % len(colors)]
+                
+                # Add coordinates to route
+                route_coordinates.append([row['latitude'], row['longitude']])
+                
+                popup_text = f"""
+                <b>{row['name']}</b><br>
+                Address: {row['address']}<br>
+                Price/Cost: {row['price_info']}<br>
+                <b>Visit Time:</b> {visit['Time']}<br>
+                Day: {int(cluster_id) + 1 if not pd.isna(cluster_id) else 'N/A'}
+                """
+                marker = folium.Marker(
+                    [row['latitude'], row['longitude']],
+                    popup=folium.Popup(popup_text, max_width=300),
+                    tooltip=f"{row['name']} (Day {int(cluster_id) + 1 if not pd.isna(cluster_id) else 'N/A'})",
+                    icon=folium.Icon(color=color, icon='home')
+                )
+                marker.add_to(m)
         
-        folium.Marker(
-            [row['latitude'], row['longitude']],
-            popup=folium.Popup(popup_text, max_width=300),
-            tooltip=f"{row['name']} (Day {int(cluster_id) + 1 if not pd.isna(cluster_id) else 'N/A'})",
-            icon=folium.Icon(color=color, icon='home')
-        ).add_to(m)
-    
+        # Add route lines between consecutive locations for this day
+        if len(route_coordinates) > 1:
+            cluster_id = day_idx  # Use day index as cluster ID for coloring
+            route_color = colors[cluster_id % len(colors)]
+            
+            # Try to use actual route geometry if available, otherwise use straight lines
+            for i in range(len(day_schedule) - 1):
+                current_visit = day_schedule.iloc[i]
+                next_visit = day_schedule.iloc[i + 1]
+                
+                # Find the corresponding entries in the main DataFrame
+                next_match = df[(df['name'] == next_visit['Location']) & (df['address'] == next_visit['Address'])]
+                
+                if not next_match.empty:
+                    next_row = next_match.iloc[0]
+                    route_geometry_json = next_row.get('ors_route_geometry', '')
+                    
+                    try:
+                        if route_geometry_json:
+                            route_geometry = json.loads(route_geometry_json)
+                            if route_geometry and 'coordinates' in route_geometry:
+                                # Convert ORS coordinates [lon, lat] to folium format [lat, lon]
+                                route_coords = [[coord[1], coord[0]] for coord in route_geometry['coordinates']]
+                                folium.PolyLine(
+                                    locations=route_coords,
+                                    color=route_color,
+                                    weight=3,
+                                    opacity=0.8,
+                                    popup=f"Route: {current_visit['Location']} → {next_visit['Location']}"
+                                ).add_to(m)
+                            else:
+                                # Fallback to straight line
+                                folium.PolyLine(
+                                    locations=[route_coordinates[i], route_coordinates[i + 1]],
+                                    color=route_color,
+                                    weight=2,
+                                    opacity=0.6,
+                                    popup=f"Route: {current_visit['Location']} → {next_visit['Location']}"
+                                ).add_to(m)
+                        else:
+                            # No route geometry, use straight line
+                            folium.PolyLine(
+                                locations=[route_coordinates[i], route_coordinates[i + 1]],
+                                color=route_color,
+                                weight=2,
+                                opacity=0.6,
+                                popup=f"Route: {current_visit['Location']} → {next_visit['Location']}"
+                            ).add_to(m)
+                    except (json.JSONDecodeError, KeyError, IndexError):
+                        # Error parsing route geometry, use straight line
+                        folium.PolyLine(
+                            locations=[route_coordinates[i], route_coordinates[i + 1]],
+                            color=route_color,
+                            weight=2,
+                            opacity=0.6,
+                            popup=f"Route: {current_visit['Location']} → {next_visit['Location']}"
+                        ).add_to(m)
+
     # Convert map to HTML
     map_html = m._repr_html_()
-    
+
     # Create schedule HTML with days side by side
-    schedule_html = create_side_by_side_schedule_html(schedule_df)
-    
-    # Create unlocated section HTML
+    schedule_html = create_side_by_side_schedule_html(schedule_df, df)
+
+    # --- Fix unlocated section to show correct name ---
     unlocated_section = ""
     if unlocated_df is not None and len(unlocated_df) > 0:
-        unlocated_list = "".join([f"• {row['name']}: {row['address']}<br>" for _, row in unlocated_df.iterrows()])
+        # Prefer original name column if present, else fallback to 'name'
+        name_col = None
+        for col in unlocated_df.columns:
+            if col.lower() in ['apartment', 'event', 'location', 'name', 'venue', 'place']:
+                name_col = col
+                break
+        if not name_col:
+            name_col = 'name' if 'name' in unlocated_df.columns else unlocated_df.columns[0]
+        
+        # Use the correct name column - look for apartment name first
+        unlocated_list = ""
+        for _, row in unlocated_df.iterrows():
+            location_name = row.get('Apartment', row.get('name', 'Unknown Location'))
+            unlocated_list += f"• {location_name}: {row['address']}<br>"
+        
         suggestions_html = f"<br><br><strong>Suggested Times:</strong><br><pre style='white-space: pre-wrap; margin: 0;'>{unlocated_suggestions}</pre>" if unlocated_suggestions else ""
         unlocated_section = f"""
-        <div class="row mt-3">
-            <div class="col-12">
-                <div class="alert alert-warning">
+        <div class=\"row mt-3\">
+            <div class=\"col-12\">
+                <div class=\"alert alert-warning\">
                     <strong>Unlocated Addresses ({len(unlocated_df)}):</strong><br>
                     {unlocated_list}
                     {suggestions_html}
@@ -863,6 +1529,9 @@ def generate_combined_html_output(df, schedule_df, output_dir, filename='locatio
             </div>
         </div>
         """
+
+    # Prepare directions data
+    directions_data, day_options = prepare_directions_data(df, schedule_df)
     
     # Load and render template
     template_content = load_html_template()
@@ -871,26 +1540,32 @@ def generate_combined_html_output(df, schedule_df, output_dir, filename='locatio
         title="Location Visitation Schedule - Combined View",
         map_html=map_html,
         schedule_html=schedule_html,
-        unlocated_section=unlocated_section
+        unlocated_section=unlocated_section,
+        directions_data=json.dumps(directions_data),
+        day_options=day_options
     )
-
+    
     # Save to specified output directory
     output_path = os.path.join(output_dir, filename)
     os.makedirs(output_dir, exist_ok=True)
     with open(output_path, 'w', encoding='utf-8') as f:
         f.write(html_content)
     print_info(f"Combined HTML output saved to {output_path}")
-
+    
     # Auto-open the HTML file
-    import webbrowser
     webbrowser.open('file://' + os.path.abspath(output_path))
+
+def generate_html_maps(df, schedule_df, output_dir, unlocated_suggestions=None, unlocated_df=None):
+    """Generate HTML maps for the schedule."""
+    # Only generate the combined map now
+    generate_combined_html_output(df, schedule_df, output_dir, 'combined_map.html', unlocated_df=unlocated_df, unlocated_suggestions=unlocated_suggestions)
 
 def main():
     global DEBUG_MODE
     
     # Parse command line arguments
     parser = argparse.ArgumentParser(description='Location Visitation Scheduler')
-    parser.add_argument('csv_file', nargs='?', help='CSV file to process')
+    parser.add_argument('csv_file', nargs='?', help='CSV file to process (searches in spreadsheets/ folder first)')
     parser.add_argument('--debug', action='store_true', help='Enable debug output')
     args = parser.parse_args()
     
@@ -905,44 +1580,40 @@ def main():
     # Load configuration
     config = load_config()
     
-    # Check for spreadsheets folder and list available CSV files
-    spreadsheets_dir = 'spreadsheets'
-    csv_files = []
-    
-    if os.path.exists(spreadsheets_dir) and os.path.isdir(spreadsheets_dir):
-        # Get all CSV files in the spreadsheets directory
-        for file in os.listdir(spreadsheets_dir):
-            if file.lower().endswith('.csv'):
-                csv_files.append(os.path.join(spreadsheets_dir, file))
-    
-    if csv_files:
-        print_info("Available CSV files in /spreadsheets/ folder:")
-        for i, file_path in enumerate(csv_files, 1):
-            file_name = os.path.basename(file_path)
-            print(f"  {i}. {file_name}")
-        
-        while True:
-            try:
-                choice = input_colored(f"\nSelect a file (1-{len(csv_files)}) or press Enter for default: ")
-                if choice == "":
-                    # Use default file
-                    csv_file = 'Updated_Madison_Area_Apartments.csv'
-                    break
-                else:
-                    choice_num = int(choice)
-                    if 1 <= choice_num <= len(csv_files):
-                        csv_file = csv_files[choice_num - 1]
-                        break
-                    else:
-                        print_error(f"Please enter a number between 1 and {len(csv_files)}")
-            except ValueError:
-                print_error("Please enter a valid number")
-    else:
-        # No CSV files found in spreadsheets folder, use default
-        if args.csv_file:
+    # Determine which CSV file to use
+    if args.csv_file:
+        # Check if file exists in spreadsheets folder first
+        spreadsheets_path = os.path.join('spreadsheets', args.csv_file)
+        if os.path.exists(spreadsheets_path):
+            csv_file = spreadsheets_path
+        elif os.path.exists(args.csv_file):
             csv_file = args.csv_file
         else:
-            csv_file = 'Updated_Madison_Area_Apartments.csv'
+            print_error(f"CSV file not found: {args.csv_file}")
+            print_info("Available CSV files in /spreadsheets/ folder:")
+            spreadsheets_dir = 'spreadsheets'
+            if os.path.exists(spreadsheets_dir):
+                for file in os.listdir(spreadsheets_dir):
+                    if file.lower().endswith('.csv'):
+                        print(f"  {file}")
+            return
+    else:
+        # No file specified, use default
+        csv_file = 'Updated_Madison_Area_Apartments.csv'
+        if not os.path.exists(csv_file):
+            # Try in spreadsheets folder
+            spreadsheets_path = os.path.join('spreadsheets', csv_file)
+            if os.path.exists(spreadsheets_path):
+                csv_file = spreadsheets_path
+            else:
+                print_error(f"Default CSV file not found: {csv_file}")
+                print_info("Available CSV files in /spreadsheets/ folder:")
+                spreadsheets_dir = 'spreadsheets'
+                if os.path.exists(spreadsheets_dir):
+                    for file in os.listdir(spreadsheets_dir):
+                        if file.lower().endswith('.csv'):
+                            print(f"  {file}")
+                return
     
     print_info(f"Processing data from: {csv_file}")
     
@@ -951,9 +1622,10 @@ def main():
     
     # Step 2: Geocode addresses
     df = geocode_addresses(original_df, config=config)
-    
-    # Step 3: Identify unlocated addresses robustly
-    # Detect name and address columns in original_df
+
+    # Step 3: Identify unlocated addresses correctly
+    # The issue is that we need to compare the original data with what was successfully geocoded
+    # Find the name and address columns in the original DataFrame
     orig_name_col = None
     orig_address_col = None
     for col in original_df.columns:
@@ -963,80 +1635,88 @@ def main():
         if not orig_address_col and 'address' in col_lower:
             orig_address_col = col
     
-    # Use address as the unique key (or name+address if available)
-    if orig_name_col and orig_address_col:
-        geocoded_keys = set(zip(df['name'], df['address']))
-        original_keys = set(zip(original_df[orig_name_col], original_df[orig_address_col]))
-        unlocated_mask = ~original_df.apply(lambda row: (row[orig_name_col], row[orig_address_col]) in geocoded_keys, axis=1)
-    elif orig_address_col:
-        geocoded_keys = set(df['address'])
-        original_keys = set(original_df[orig_address_col])
-        unlocated_mask = ~original_df[orig_address_col].isin(df['address'])
-    else:
-        print_error('Could not find address column in original CSV!')
-        unlocated_mask = pd.Series([False]*len(original_df))
+    if DEBUG_MODE:
+        print_debug(f"Original name column: {orig_name_col}")
+        print_debug(f"Original address column: {orig_address_col}")
+        print_debug(f"Original DataFrame length: {len(original_df)}")
+        print_debug(f"Geocoded DataFrame length: {len(df)}")
     
+    # Create a set of successfully geocoded original addresses
+    # Use the original_address field if available, otherwise fall back to address
+    geocoded_original_addresses = set()
+    if len(df) > 0:
+        for _, row in df.iterrows():
+            original_addr = row.get('original_address', row['address'])
+            geocoded_original_addresses.add(original_addr)
+    
+    # Find addresses in original DataFrame that are NOT in the geocoded set
+    unlocated_mask = ~original_df[orig_address_col].isin(geocoded_original_addresses)
     unlocated_df = original_df[unlocated_mask].copy()
     
-    # Ensure unlocated_df has the same column structure as df
-    if len(unlocated_df) > 0:
-        # Determine column names from the geocoding process
-        name_col = None
-        address_col = None
-        price_col = None
-        
-        # Check for name column (apartment, event, location, name, etc.)
-        for col in unlocated_df.columns:
-            col_lower = col.lower()
-            if any(keyword in col_lower for keyword in ['apartment', 'event', 'location', 'name', 'venue', 'place']):
-                name_col = col
-                break
-        
-        # Check for address column
-        for col in unlocated_df.columns:
-            if 'address' in col.lower():
-                address_col = col
-                break
-        
-        # Check for price/cost column
-        for col in unlocated_df.columns:
-            col_lower = col.lower()
-            if any(keyword in col_lower for keyword in ['price', 'cost', 'fee', 'rate']):
-                price_col = col
-                break
-        
-        # Rename columns to match the processed DataFrame
-        if name_col and name_col != 'name':
-            unlocated_df = unlocated_df.rename(columns={name_col: 'name'})
-        if address_col and address_col != 'address':
-            unlocated_df = unlocated_df.rename(columns={address_col: 'address'})
-        if price_col and price_col != 'price_info':
-            unlocated_df = unlocated_df.rename(columns={price_col: 'price_info'})
-        elif not price_col:
-            unlocated_df['price_info'] = 'N/A'
+    if DEBUG_MODE:
+        print_debug(f"Geocoded original addresses: {list(geocoded_original_addresses)}")
+        print_debug(f"Unlocated addresses: {list(unlocated_df[orig_address_col]) if len(unlocated_df) > 0 else []}")
+        print_debug(f"Unlocated DataFrame length: {len(unlocated_df)}")
     
+    # Ensure unlocated_df has the correct column structure for later use
+    if len(unlocated_df) > 0:
+        # Rename columns to match the processed DataFrame structure
+        if orig_name_col and orig_name_col != 'name':
+            unlocated_df = unlocated_df.rename(columns={orig_name_col: 'name'})
+        if orig_address_col and orig_address_col != 'address':
+            unlocated_df = unlocated_df.rename(columns={orig_address_col: 'address'})
+        
+        # Add price_info column if it doesn't exist
+        if 'price_info' not in unlocated_df.columns:
+            # Find price column in original data
+            price_col = None
+            for col in unlocated_df.columns:
+                col_lower = col.lower()
+                if any(keyword in col_lower for keyword in ['price', 'cost', 'fee', 'rate']):
+                    price_col = col
+                    break
+            if price_col:
+                unlocated_df = unlocated_df.rename(columns={price_col: 'price_info'})
+            else:
+                unlocated_df['price_info'] = 'N/A'
+        
+        # Instead of round-robin assignment, we'll let the suggest_visit_times_for_unlocated function
+        # determine the best day for each unlocated address based on available time slots
+        # For now, assign all to day 0 (first day) and let the function redistribute them
+        unlocated_df['cluster'] = 0
+
     # Step 4: Cluster locations (only for located addresses)
     df = cluster_locations(df, n_clusters=config.get('clustering', {}).get('n_clusters', 2))
     
     # Step 5: Optimize routes
     df = optimize_routes(df)
     
+    # Step 5.5: Calculate ORS travel times
+    df = calculate_ors_travel_times(df, config=config)
+    
     # Step 6: Create schedule
     schedule_df = create_schedule(df, config=config)
+    
+    # Step 6.5: Validate schedule with ORS
+    schedule_df, ors_warnings = validate_schedule_with_ors(schedule_df, df, config=config)
+    if ors_warnings:
+        print_warning("Schedule validation warnings:")
+        for warning in ors_warnings:
+            print_warning(f"  {warning}")
     
     # Step 7: Generate time suggestions for unlocated addresses
     unlocated_suggestions = None
     if len(unlocated_df) > 0:
         print_info(f"Generating time suggestions for {len(unlocated_df)} unlocated addresses...")
-        unlocated_suggestions = suggest_times_for_unlocated(df, unlocated_df, config)
+        unlocated_suggestions = suggest_visit_times_for_unlocated(unlocated_df, schedule_df, config)
         print_info("Time suggestions generated for unlocated addresses.")
     
     # Step 8: Create output directory using trip name (from CSV filename, no extension)
     trip_name = os.path.splitext(os.path.basename(csv_file))[0]
     trip_output_dir = create_trip_output_directory(trip_name)
     
-    # Step 9: Generate combined HTML output with all days side by side
-    generate_combined_html_output(df, schedule_df, trip_output_dir, 'location_schedule_combined.html', unlocated_df, unlocated_suggestions)
+    # Step 9: Generate HTML maps for the schedule
+    generate_html_maps(df, schedule_df, trip_output_dir, unlocated_suggestions, unlocated_df)
     
     # Step 10: Generate HTML output for each day (for reference)
     for cluster_id in df['cluster'].unique():

@@ -1,0 +1,327 @@
+{% extends "base.html" %}
+
+{% block title %}Settings - Location Visitation Scheduler{% endblock %}
+
+{% block content %}
+<div class="row">
+    <div class="col-lg-8">
+        <div class="card">
+            <div class="card-header">
+                <h4 class="mb-0">
+                    <i class="fas fa-cog me-2"></i>
+                    Scheduler Configuration
+                </h4>
+            </div>
+            <div class="card-body">
+                <form method="post">
+                    <!-- Basic Settings -->
+                    <div class="config-section">
+                        <h5 class="text-primary">
+                            <i class="fas fa-clock me-2"></i>
+                            Basic Settings
+                        </h5>
+                        <div class="row">
+                            <div class="col-md-4">
+                                <div class="mb-3">
+                                    <label for="default_visit_hours" class="form-label">Visit Duration (hours)</label>
+                                    <input type="number" class="form-control" id="default_visit_hours" 
+                                           name="default_visit_hours" step="0.25" min="0.25" max="4"
+                                           value="{{ config.default_visit_hours }}">
+                                    <div class="form-text">How long to spend at each location</div>
+                                </div>
+                            </div>
+                            <div class="col-md-4">
+                                <div class="mb-3">
+                                    <label for="default_buffer_minutes" class="form-label">Buffer Time (minutes)</label>
+                                    <input type="number" class="form-control" id="default_buffer_minutes" 
+                                           name="default_buffer_minutes" min="5" max="120"
+                                           value="{{ config.default_buffer_minutes }}">
+                                    <div class="form-text">Travel time between locations</div>
+                                </div>
+                            </div>
+                            <div class="col-md-4">
+                                <div class="mb-3">
+                                    <label for="n_clusters" class="form-label">Number of Days</label>
+                                    <select class="form-select" id="n_clusters" name="n_clusters" onchange="updateDayConfigs()">
+                                        {% for i in range(1, 8) %}
+                                            <option value="{{ i }}" {% if i == config.clustering.n_clusters %}selected{% endif %}>
+                                                {{ i }} day{% if i > 1 %}s{% endif %}
+                                            </option>
+                                        {% endfor %}
+                                    </select>
+                                    <div class="form-text">Split locations across multiple days</div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Day-specific Settings -->
+                    <div class="config-section">
+                        <h5 class="text-primary">
+                            <i class="fas fa-calendar-alt me-2"></i>
+                            Day-specific Settings
+                        </h5>
+                        <div id="dayConfigs">
+                            {% for i in range(config.clustering.n_clusters) %}
+                                <div class="day-config" data-day="{{ i }}">
+                                    <h6 class="text-secondary">Day {{ i + 1 }}</h6>
+                                    <div class="row">
+                                        <div class="col-md-4">
+                                            <div class="mb-3">
+                                                <label for="visit_date_{{ i }}" class="form-label">Date</label>
+                                                <input type="text" class="form-control" id="visit_date_{{ i }}" 
+                                                       name="visit_date_{{ i }}" 
+                                                       value="{{ config.visit_dates[i] if i < config.visit_dates|length else 'July ' + (16 + i)|string + ', 2024' }}">
+                                            </div>
+                                        </div>
+                                        <div class="col-md-4">
+                                            <div class="mb-3">
+                                                <label for="start_time_{{ i }}" class="form-label">Start Time</label>
+                                                <input type="time" class="form-control" id="start_time_{{ i }}" 
+                                                       name="start_time_{{ i }}" 
+                                                       value="{{ config.start_times[i] if i < config.start_times|length else '09:00' }}">
+                                            </div>
+                                        </div>
+                                        <div class="col-md-4">
+                                            <div class="mb-3">
+                                                <label for="max_end_time_{{ i }}" class="form-label">End Time</label>
+                                                <input type="time" class="form-control" id="max_end_time_{{ i }}" 
+                                                       name="max_end_time_{{ i }}" 
+                                                       value="{{ config.max_end_times[i] if i < config.max_end_times|length else '22:00' }}">
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            {% endfor %}
+                        </div>
+                    </div>
+
+                    <!-- Geocoding Settings -->
+                    <div class="config-section">
+                        <h5 class="text-primary">
+                            <i class="fas fa-map-marker-alt me-2"></i>
+                            Geocoding Settings
+                        </h5>
+                        <div class="row">
+                            <div class="col-md-4">
+                                <div class="mb-3">
+                                    <label for="max_retries" class="form-label">Max Retries</label>
+                                    <input type="number" class="form-control" id="max_retries" 
+                                           name="max_retries" min="1" max="10"
+                                           value="{{ config.geocoding.max_retries }}">
+                                    <div class="form-text">Retry failed geocoding attempts</div>
+                                </div>
+                            </div>
+                            <div class="col-md-4">
+                                <div class="mb-3">
+                                    <label for="max_wait_seconds" class="form-label">Max Wait (seconds)</label>
+                                    <input type="number" class="form-control" id="max_wait_seconds" 
+                                           name="max_wait_seconds" min="60" max="600"
+                                           value="{{ config.geocoding.max_wait_seconds }}">
+                                    <div class="form-text">Maximum wait time for geocoding</div>
+                                </div>
+                            </div>
+                            <div class="col-md-4">
+                                <div class="mb-3">
+                                    <label for="rate_limit_delay" class="form-label">Rate Limit (seconds)</label>
+                                    <input type="number" class="form-control" id="rate_limit_delay" 
+                                           name="rate_limit_delay" min="1" max="10"
+                                           value="{{ config.geocoding.rate_limit_delay }}">
+                                    <div class="form-text">Delay between geocoding requests</div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- OpenRouteService Settings -->
+                    <div class="config-section">
+                        <h5 class="text-primary">
+                            <i class="fas fa-route me-2"></i>
+                            OpenRouteService (Driving Directions)
+                        </h5>
+                        <div class="row">
+                            <div class="col-md-3">
+                                <div class="mb-3">
+                                    <div class="form-check">
+                                        <input class="form-check-input" type="checkbox" id="ors_enabled" 
+                                               name="ors_enabled" 
+                                               {% if config.ors.enabled %}checked{% endif %}>
+                                        <label class="form-check-label" for="ors_enabled">
+                                            Enable ORS
+                                        </label>
+                                    </div>
+                                    <div class="form-text">Calculate real driving times and directions</div>
+                                </div>
+                            </div>
+                            <div class="col-md-3">
+                                <div class="mb-3">
+                                    <div class="form-check">
+                                        <input class="form-check-input" type="checkbox" id="use_for_validation" 
+                                               name="use_for_validation" 
+                                               {% if config.ors.use_for_validation %}checked{% endif %}>
+                                        <label class="form-check-label" for="use_for_validation">
+                                            Validate Schedule
+                                        </label>
+                                    </div>
+                                    <div class="form-text">Check if routes fit within time windows</div>
+                                </div>
+                            </div>
+                            <div class="col-md-3">
+                                <div class="mb-3">
+                                    <div class="form-check">
+                                        <input class="form-check-input" type="checkbox" id="show_directions" 
+                                               name="show_directions" 
+                                               {% if config.ors.show_directions %}checked{% endif %}>
+                                        <label class="form-check-label" for="show_directions">
+                                            Show Directions
+                                        </label>
+                                    </div>
+                                    <div class="form-text">Display turn-by-turn directions in HTML</div>
+                                </div>
+                            </div>
+                            <div class="col-md-3">
+                                <div class="mb-3">
+                                    <label for="ors_profile" class="form-label">Transport Profile</label>
+                                    <select class="form-select" id="ors_profile" name="ors_profile">
+                                        <option value="driving-car" {% if config.ors.profile == 'driving-car' %}selected{% endif %}>Driving (Car)</option>
+                                        <option value="driving-hgv" {% if config.ors.profile == 'driving-hgv' %}selected{% endif %}>Driving (Truck)</option>
+                                        <option value="cycling-regular" {% if config.ors.profile == 'cycling-regular' %}selected{% endif %}>Cycling</option>
+                                        <option value="foot-walking" {% if config.ors.profile == 'foot-walking' %}selected{% endif %}>Walking</option>
+                                    </select>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Save Button -->
+                    <div class="d-flex justify-content-between">
+                        <a href="{{ url_for('index') }}" class="btn btn-outline-secondary">
+                            <i class="fas fa-arrow-left me-1"></i>
+                            Back to Home
+                        </a>
+                        <button type="submit" class="btn btn-primary">
+                            <i class="fas fa-save me-1"></i>
+                            Save Configuration
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <div class="col-lg-4">
+        <!-- Configuration Help -->
+        <div class="card">
+            <div class="card-header">
+                <h5 class="mb-0">
+                    <i class="fas fa-info-circle me-2"></i>
+                    Configuration Help
+                </h5>
+            </div>
+            <div class="card-body">
+                <div class="mb-3">
+                    <h6>Visit Duration</h6>
+                    <p class="small text-muted">
+                        How long to spend at each location. Typical values: 0.5-1.5 hours.
+                    </p>
+                </div>
+                
+                <div class="mb-3">
+                    <h6>Buffer Time</h6>
+                    <p class="small text-muted">
+                        Travel time between locations. Consider traffic and distance.
+                    </p>
+                </div>
+                
+                <div class="mb-3">
+                    <h6>Number of Days</h6>
+                    <p class="small text-muted">
+                        Split your visits across multiple days for better organization.
+                    </p>
+                </div>
+                
+                <div class="mb-3">
+                    <h6>Start/End Times</h6>
+                    <p class="small text-muted">
+                        Define working hours for each day. Visits will be scheduled within these times.
+                    </p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Current Configuration Summary -->
+        <div class="card mt-4">
+            <div class="card-header">
+                <h5 class="mb-0">
+                    <i class="fas fa-list me-2"></i>
+                    Current Settings
+                </h5>
+            </div>
+            <div class="card-body">
+                <div class="small">
+                    <div class="mb-2">
+                        <strong>Days:</strong> {{ config.clustering.n_clusters }}
+                    </div>
+                    <div class="mb-2">
+                        <strong>Visit Duration:</strong> {{ config.default_visit_hours }} hours
+                    </div>
+                    <div class="mb-2">
+                        <strong>Buffer Time:</strong> {{ config.default_buffer_minutes }} minutes
+                    </div>
+                    <div class="mb-2">
+                        <strong>Geocoding Retries:</strong> {{ config.geocoding.max_retries }}
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function updateDayConfigs() {
+    const nClusters = parseInt(document.getElementById('n_clusters').value);
+    const container = document.getElementById('dayConfigs');
+    
+    // Clear existing configs
+    container.innerHTML = '';
+    
+    // Add configs for each day
+    for (let i = 0; i < nClusters; i++) {
+        const dayConfig = document.createElement('div');
+        dayConfig.className = 'day-config';
+        dayConfig.setAttribute('data-day', i);
+        
+        dayConfig.innerHTML = `
+            <h6 class="text-secondary">Day ${i + 1}</h6>
+            <div class="row">
+                <div class="col-md-4">
+                    <div class="mb-3">
+                        <label for="visit_date_${i}" class="form-label">Date</label>
+                        <input type="text" class="form-control" id="visit_date_${i}" 
+                               name="visit_date_${i}" value="July ${16 + i}, 2024">
+                    </div>
+                </div>
+                <div class="col-md-4">
+                    <div class="mb-3">
+                        <label for="start_time_${i}" class="form-label">Start Time</label>
+                        <input type="time" class="form-control" id="start_time_${i}" 
+                               name="start_time_${i}" value="09:00">
+                    </div>
+                </div>
+                <div class="col-md-4">
+                    <div class="mb-3">
+                        <label for="max_end_time_${i}" class="form-label">End Time</label>
+                        <input type="time" class="form-control" id="max_end_time_${i}" 
+                               name="max_end_time_${i}" value="22:00">
+                    </div>
+                </div>
+            </div>
+        `;
+        
+        container.appendChild(dayConfig);
+    }
+}
+</script>
+{% endblock %} 
