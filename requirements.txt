@@ -1,0 +1,6 @@
+pandas
+geopy
+scikit-learn
+folium
+tqdm
+openai 
