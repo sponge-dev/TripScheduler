@@ -1,105 +1,140 @@
-# Apartment Visitation Scheduler
+# Location Visitation Scheduler
 
-This program takes a CSV file of apartment addresses, geocodes them, clusters them into two days of visits, optimizes the visitation order, and generates both a schedule and an interactive HTML map.
+A Python program that processes CSV files of location addresses, geocodes them, clusters visits into multiple days, optimizes routes, and generates interactive HTML maps with schedules.
 
 ## Features
-- **Smart CSV Selection**: Automatically detects CSV files in `/spreadsheets/` folder and lets you choose which one to process
-- **Intelligent Geocoding**: Uses Nominatim (OpenStreetMap) with OpenAI-powered address reformatting for better success rates
-- **Persistent Caching**: Saves geocoding results to avoid re-querying the API for the same addresses
-- **Smart Retry Logic**: Only retries on actual errors (network issues, rate limits), not on invalid addresses
-- **Route Optimization**: Clusters apartments into two days to minimize travel distance
-- **Optimized Scheduling**: 1 hour per apartment with 30-minute buffer between visits
-- **Combined Output**: Interactive HTML map and schedule displayed side by side
-- **Multiple Output Formats**: HTML map + schedule, plus separate CSV schedule file
 
-## Installation
+- **Smart CSV Processing**: Automatically detects CSV files in `/spreadsheets/` folder
+- **Multi-Service Geocoding**: Uses Nominatim with Photon API fallback for better success rates
+- **OpenAI Integration**: Optional address reformatting for better geocoding success
+- **Route Optimization**: Clusters locations into days and optimizes visit order
+- **Flexible Scheduling**: Supports any number of days (2, 3, 5, etc.)
+- **Interactive Output**: HTML map and schedule side by side with Bootstrap styling
+- **Template System**: Customizable HTML templates in `/templates/` directory
+- **Unlocated Handling**: Tracks addresses that couldn't be geocoded with suggested times
+- **Auto-organization**: Groups output files by trip name in `/output/` directories
+- **Colorful Terminal**: Colored output with loading animations and debug mode
 
-1. Install Python 3.7+
-2. Install dependencies:
+## Quick Start
+
+1. **Install dependencies:**
    ```bash
    pip install -r requirements.txt
    ```
 
-## Setup
+2. **Optional setup:**
+   - Create `spreadsheets/` folder for CSV files
+   - Create `api_keys.json` for OpenAI integration
+   - Customize `config.json` for scheduling preferences
 
-### Optional: OpenAI Integration
-For better address geocoding success, create an `api_keys.json` file:
+3. **Run the program:**
+   ```bash
+   python main.py                    # Interactive CSV selection
+   python main.py your_file.csv      # Direct file specification
+   python main.py --debug            # Detailed output
+   ```
+
+## CSV Format
+
+Your CSV needs these columns:
+- **Name**: `Apartment`, `Event`, `Location`, `Name`, `Venue`, or `Place`
+- **Address**: `Address`
+- **Price/Cost** (optional): `Price`, `Cost`, `Fee`, or `Rate`
+- **Buffer Time** (optional): `Time`, `Buffer`, `Duration`, or `Wait` (minutes)
+
+**Example:**
+```csv
+Apartment,Address,Price Range,Buffer Time
+Greenbriar Village,238 Randolph Dr,Madison,WI 53717,$1,240 - $1,895,45
+Park Village,2305 S Park St,Madison,WI 53713,$1,130 - $1,640,30
+```
+
+## Configuration
+
+Edit `config.json` to customize:
+```json
+{
+  "default_buffer_minutes": 30,
+  "default_visit_hours": 1,
+  "start_times": ["09:00", "09:00"],
+  "visit_dates": ["July 16, 2024", "July 17, 2024"],
+  "geocoding": {
+    "max_retries": 3,
+    "max_wait_seconds": 300,
+    "rate_limit_delay": 1
+  },
+  "clustering": {
+    "n_clusters": 2
+  }
+}
+```
+
+### Multiple Days
+
+The script supports any number of days. Simply update the configuration:
+
+**Example for 3 days:**
+```json
+{
+  "clustering": {
+    "n_clusters": 3
+  },
+  "start_times": ["09:00", "10:00", "11:00"],
+  "visit_dates": ["July 16, 2024", "July 17, 2024", "July 18, 2024"]
+}
+```
+
+**Example for 5 days:**
+```json
+{
+  "clustering": {
+    "n_clusters": 5
+  },
+  "start_times": ["09:00", "10:00", "11:00", "09:00", "10:00"],
+  "visit_dates": ["July 16, 2024", "July 17, 2024", "July 18, 2024", "July 19, 2024", "July 20, 2024"]
+}
+```
+
+**Important:** Array lengths must match (`n_clusters`, `start_times`, and `visit_dates`).
+
+## Output
+
+- **`output/(tripname)/location_schedule_combined.html`**: Main interactive map with schedule
+- **`output/(tripname)/location_schedule_day_X.csv`**: Daily schedules
+- **`output/(tripname)/complete_location_schedule.csv`**: Complete schedule
+- **`geocode_cache.json`**: Cached geocoding results
+
+The main HTML file opens automatically in your browser.
+
+## Customization
+
+### Templates
+Edit `templates/schedule_template.html` to customize the HTML output. Available placeholders:
+- `{{title}}`: Page title
+- `{{map_html}}`: Interactive map
+- `{{schedule_html}}`: Schedule display
+- `{{unlocated_section}}`: Unlocated addresses section
+
+### OpenAI Integration
+Create `api_keys.json` for address reformatting:
 ```json
 {
     "openai_api_key": "your-openai-api-key-here"
 }
 ```
 
-### Optional: Spreadsheets Folder
-Create a `spreadsheets/` folder and place your CSV files there for easy selection.
+## Geocoding Services
 
-## Usage
+The script uses multiple geocoding services for maximum success:
 
-### Method 1: Interactive Selection (Recommended)
-1. Place your CSV files in the `spreadsheets/` folder
-2. Run the script:
-   ```bash
-   python main.py
-   ```
-3. Choose from the numbered list of available CSV files
-4. Press Enter to use the default file
-
-### Method 2: Direct File Specification
-```bash
-python main.py your_file.csv
-```
-
-### CSV Format
-Your CSV should have these columns:
-- `Apartment` (or `apartment name`)
-- `Address`
-- `Price Range` (or `price`)
-
-## Output Files
-
-- **`apartment_schedule.html`**: Interactive map with apartments colored by day (red = Day 1, blue = Day 2) and schedule side by side
-- **`apartment_schedule.csv`**: Detailed visitation schedule with times and addresses
-- **`geocode_cache.json`**: Cached geocoding results for faster future runs
-
-## How It Works
-
-1. **CSV Processing**: Reads your apartment data
-2. **Smart Geocoding**: 
-   - Checks cache first for existing results
-   - Uses Nominatim for geocoding
-   - If address fails, uses OpenAI to reformat and retry once
-   - Skips invalid addresses after one reformat attempt
-3. **Clustering**: Groups apartments into two days using K-means clustering
-4. **Route Optimization**: Orders visits within each day to minimize travel distance
-5. **Schedule Generation**: Creates detailed schedule with 1-hour visits and 30-minute buffers
-6. **Map Creation**: Generates interactive HTML map with all apartments
-
-## Schedule Details
-
-- **Day 1**: July 16, 2024 (Red markers on map)
-- **Day 2**: July 17, 2024 (Blue markers on map)
-- **Visit Duration**: 1 hour per apartment
-- **Buffer Time**: 30 minutes between visits
-- **Start Time**: 9:00 AM each day
+1. **Nominatim** (OpenStreetMap) - Primary service
+2. **OpenAI Address Reformating** - Improves address format if available
+3. **Photon API** - Fallback service for failed addresses
+4. **Persistent Caching** - Saves results to avoid repeated API calls
 
 ## Troubleshooting
 
-### Geocoding Issues
-- Some addresses may not be found in the geocoding database
-- The script will skip these after one reformat attempt
-- Check your address accuracy if many are being skipped
-
-### OpenAI Integration
-- If `api_keys.json` is missing or invalid, the script will work without OpenAI reformatting
-- OpenAI is only used when addresses fail to geocode initially
-
-### Performance
-- First run may be slower due to geocoding
-- Subsequent runs will be much faster due to caching
-- Invalid addresses are cached to avoid repeated attempts
-
-## Notes
-- Geocoding uses the free Nominatim (OpenStreetMap) service
-- For large numbers of addresses, consider using a paid geocoding API
-- The script respects API rate limits and includes exponential backoff for errors 
-- For large numbers of addresses, consider using a paid geocoding API. 
+- **Geocoding failures**: Some addresses may not be found. The script tries multiple services and will skip only after all attempts fail.
+- **Performance**: First run is slower due to geocoding. Subsequent runs use cached results.
+- **Debug mode**: Use `--debug` flag for detailed output and troubleshooting.
+- **Multiple days**: Ensure `n_clusters`, `start_times`, and `visit_dates` arrays have matching lengths. 

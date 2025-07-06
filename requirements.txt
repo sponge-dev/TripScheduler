@@ -3,4 +3,4 @@ geopy
 scikit-learn
 folium
 tqdm
-openai 
+openai

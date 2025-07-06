@@ -1,1 +1,78 @@
-{"238 Randolph Dr, Madison, WI 53717": [43.0617721, -89.5127504], "2305 S Park St, Madison, WI 53713": [43.0407222, -89.3935555], "5577 Odana Rd, Madison, WI 53719": [43.0499216, -89.4765102], "3021 Maple Valley Dr, Madison, WI 53719": [43.0173845, -89.4976899], "6701 Schroeder Rd, Madison, WI 53711": [43.0463439, -89.4967525], "6840 Schroeder Rd, Madison, WI 53711": [43.0461566, -89.5007878], "405-415 Moorland Rd, Madison, WI 53713": [43.0328045, -89.3606462], "7425 Timber Lake Trail, Madison, WI 53719": [43.0522955, -89.5111423], "2809 Curry Pkwy, Madison, WI 53713": [43.0348025, -89.4260164], "2517 Pheasant Ridge Trl, Madison, WI 53717": [null, null], "3145 Muir Field Rd, Madison, WI 53719": [43.017427, -89.510154], "2506 McDivitt Rd, Madison, WI 53713": [null, null], "6749 Fairhaven Rd, Madison, WI 53719": [43.0046863, -89.5005208], "13 Captains Court, Madison, WI 53719": [43.0501468, -89.5067717], "2974 Ochalla Dr, Fitchburg, WI 53713": [43.0276628, -89.4094023], "3101 Fish Hatchery Rd, Fitchburg, WI 53713": [43.0249321, -89.4139278], "8002 Starr Grass Dr, Madison, WI 53719": [43.0367729, -89.5239408], "4888 Brassica Rd, Fitchburg, WI 53711": [43.0124886, -89.3738637], "620 W Badger Rd, Madison, WI 53713": [43.0385168, -89.3897762]}
+{
+  "238 Randolph Dr, Madison, WI 53717": {
+    "lat": 43.0617721,
+    "lon": -89.5127504
+  },
+  "2305 S Park St, Madison, WI 53713": {
+    "lat": 43.0407222,
+    "lon": -89.3935555
+  },
+  "5577 Odana Rd, Madison, WI 53719": {
+    "lat": 43.0499216,
+    "lon": -89.4765102
+  },
+  "3021 Maple Valley Dr, Madison, WI 53719": {
+    "lat": 43.0173845,
+    "lon": -89.4976899
+  },
+  "6701 Schroeder Rd, Madison, WI 53711": {
+    "lat": 43.0463439,
+    "lon": -89.4967525
+  },
+  "6840 Schroeder Rd, Madison, WI 53711": {
+    "lat": 43.0461566,
+    "lon": -89.5007878
+  },
+  "405-415 Moorland Rd, Madison, WI 53713": {
+    "lat": 43.0328045,
+    "lon": -89.3606462
+  },
+  "7425 Timber Lake Trail, Madison, WI 53719": {
+    "lat": 43.0522955,
+    "lon": -89.5111423
+  },
+  "2809 Curry Pkwy, Madison, WI 53713": {
+    "lat": 43.0348025,
+    "lon": -89.4260164
+  },
+  "2517 Pheasant Ridge Trl, Madison, WI 53717, United States": null,
+  "3145 Muir Field Rd, Madison, WI 53719": {
+    "lat": 43.017427,
+    "lon": -89.510154
+  },
+  "2506 McDivitt Rd, Madison, WI 53713": {
+    "lat": 43.0252897,
+    "lon": -89.50339437529499
+  },
+  "6749 Fairhaven Rd, Madison, WI 53719": {
+    "lat": 43.0046863,
+    "lon": -89.5005208
+  },
+  "13 Captains Ct Unit 8, Madison, WI 53719": null,
+  "2974 Ochalla Dr, Fitchburg, WI 53713": {
+    "lat": 43.0276628,
+    "lon": -89.4094023
+  },
+  "3101 Fish Hatchery Rd, Fitchburg, WI 53713": {
+    "lat": 43.0249321,
+    "lon": -89.4139278
+  },
+  "8002 Starr Grass Dr, Madison, WI 53719": {
+    "lat": 43.0367729,
+    "lon": -89.5239408
+  },
+  "4888 Brassica Rd, Fitchburg, WI 53711": {
+    "lat": 43.0124886,
+    "lon": -89.3738637
+  },
+  "620 W Badger Rd, Madison, WI 53713": {
+    "lat": 43.0385168,
+    "lon": -89.3897762
+  },
+  "2517 Pheasant Ridge Trail, Madison, Wisconsin 53717": {
+    "lat": 43.0846949,
+    "lon": -89.5291909
+  },
+  "13 Captains Ct, Unit 8, Madison, WI 53719": null,
+  "6701-6785 Schroeder Rd, Madison, WI 53711": null
+}
