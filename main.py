@@ -1819,6 +1819,50 @@ def prepare_directions_data(df, schedule_df, config=None):
     
     return directions_data, day_options
 
+def generate_map_legend_html(schedule_df):
+    """Generate HTML for the map legend based on actual days in the schedule."""
+    # Color scheme for clusters - same as used in the map
+    colors = ['red', 'blue', 'green', 'purple', 'orange', 'darkred', 'lightred', 'beige', 'darkblue', 'darkgreen', 'cadetblue', 'darkpurple', 'white', 'pink', 'lightblue', 'lightgreen', 'gray', 'black', 'lightgray']
+    
+    # Convert folium color names to CSS hex colors for the legend
+    color_map = {
+        'red': '#dc3545',
+        'blue': '#0d6efd', 
+        'green': '#198754',
+        'purple': '#6f42c1',
+        'orange': '#fd7e14',
+        'darkred': '#722f37',
+        'lightred': '#f1aeb5',
+        'beige': '#f5f5dc',
+        'darkblue': '#0a58ca',
+        'darkgreen': '#146c43',
+        'cadetblue': '#5f9ea0',
+        'darkpurple': '#59359a',
+        'white': '#ffffff',
+        'pink': '#d63384',
+        'lightblue': '#cfe2ff',
+        'lightgreen': '#d1e7dd',
+        'gray': '#6c757d',
+        'black': '#000000',
+        'lightgray': '#f8f9fa'
+    }
+    
+    legend_html = ""
+    dates = schedule_df['Date'].unique()
+    
+    for day_idx, date in enumerate(dates):
+        color_name = colors[day_idx % len(colors)]
+        color_hex = color_map.get(color_name, '#007bff')  # Default to blue if not found
+        
+        legend_html += f'''
+        <div class="legend-item">
+            <div class="legend-box" style="background-color: {color_hex}; border: 1px solid #ccc;"></div>
+            <span class="legend-text">Day {day_idx + 1}</span>
+        </div>
+        '''
+    
+    return legend_html
+
 def generate_combined_html_output(df, schedule_df, output_dir, filename='location_schedule_combined.html', unlocated_df=None, unlocated_suggestions=None, warnings=None):
     """Generate combined HTML output with map and schedule side by side."""
     # Create the map
@@ -1959,6 +2003,9 @@ def generate_combined_html_output(df, schedule_df, output_dir, filename='locatio
     # Prepare directions data
     directions_data, day_options = prepare_directions_data(df, schedule_df)
     
+    # Generate legend HTML
+    legend_html = generate_map_legend_html(schedule_df)
+    
     # Load and render template
     template_content = load_html_template()
     # Generate warnings section HTML
@@ -1982,7 +2029,8 @@ def generate_combined_html_output(df, schedule_df, output_dir, filename='locatio
         unlocated_section=unlocated_section,
         directions_data=json.dumps(directions_data),
         day_options=day_options,
-        warnings_section=warnings_section
+        warnings_section=warnings_section,
+        legend_html=legend_html
     )
     
     # Save to specified output directory
