@@ -104,6 +104,9 @@ def preview_csv(filename, rows=10):
         filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
         df = pd.read_csv(filepath)
         
+        # Handle NaN values by replacing them with empty string
+        df = df.fillna('')
+        
         # Convert to dict for JSON serialization
         preview_data = {
             'columns': list(df.columns),
@@ -449,16 +452,22 @@ def save_csv_data(filename):
 def download_file(filename):
     """Download or view generated files"""
     try:
+        # Construct the full file path relative to the output directory
+        full_file_path = os.path.join('output', filename)
+        
         # Ensure the file path is safe and exists
-        if not os.path.exists(filename):
+        if not os.path.exists(full_file_path):
             flash(f'File not found: {filename}')
             return redirect(url_for('results_page'))
         
+        # Convert to absolute path for send_file
+        abs_file_path = os.path.abspath(full_file_path)
+        
         # For HTML files, open in browser; for other files, download
         if filename.lower().endswith('.html'):
-            return send_file(filename, as_attachment=False)
+            return send_file(abs_file_path, as_attachment=False)
         else:
-            return send_file(filename, as_attachment=True)
+            return send_file(abs_file_path, as_attachment=True)
     except Exception as e:
         flash(f'Error accessing file: {str(e)}')
         return redirect(url_for('results_page'))

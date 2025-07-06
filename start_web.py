@@ -30,7 +30,7 @@ def check_dependencies():
             missing_packages.append(package)
     
     if missing_packages:
-        print("❌ Missing required packages:")
+        print("[ERROR] Missing required packages:")
         for package in missing_packages:
             print(f"   - {package}")
         print("\n💡 To install missing packages, run:")
@@ -40,22 +40,22 @@ def check_dependencies():
             print(f"   pip install {package}")
         return False
     
-    print("✅ All required packages are installed!")
+    print("[OK] All required packages are installed!")
     return True
 
 def main():
     """Main startup function"""
-    print("🗺️  Location Visitation Scheduler - Web Interface")
+    print("Location Visitation Scheduler - Web Interface")
     print("=" * 50)
     
     # Check if we're in the right directory
     if not os.path.exists('main.py'):
-        print("❌ Error: main.py not found in current directory")
+        print("[ERROR] main.py not found in current directory")
         print("   Please run this script from the ScheduleMap directory")
         sys.exit(1)
     
     # Check dependencies
-    print("🔍 Checking dependencies...")
+    print("Checking dependencies...")
     if not check_dependencies():
         sys.exit(1)
     
@@ -74,11 +74,11 @@ def main():
             sys.path.append('.')
             from main import create_default_config
             create_default_config()
-            print("✅ Default configuration created")
+            print("[OK] Default configuration created")
         except Exception as e:
-            print(f"⚠️  Warning: Could not create default config: {e}")
+            print(f"[WARNING] Could not create default config: {e}")
     
-    print("\n🚀 Starting web interface...")
+    print("\nStarting web interface...")
     print("   Open your browser to: http://localhost:5000")
     print("   Press Ctrl+C to stop the server")
     print("-" * 50)
@@ -101,9 +101,9 @@ def main():
         
         app.run(debug=False, host='0.0.0.0', port=5000)
     except KeyboardInterrupt:
-        print("\n\n👋 Web interface stopped. Goodbye!")
+        print("\n\nWeb interface stopped. Goodbye!")
     except Exception as e:
-        print(f"\n❌ Error starting web interface: {e}")
+        print(f"\n[ERROR] Error starting web interface: {e}")
         sys.exit(1)
 
 if __name__ == '__main__':

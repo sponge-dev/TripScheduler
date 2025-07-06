@@ -54,28 +54,28 @@ class Spinner:
 # Colored output functions
 def print_info(msg):
     try:
-        print(f"{Fore.GREEN}{Style.BRIGHT}✓ {msg}{Style.RESET_ALL}")
-    except UnicodeEncodeError:
         print(f"{Fore.GREEN}{Style.BRIGHT}[OK] {msg}{Style.RESET_ALL}")
+    except UnicodeEncodeError:
+        print(f"[OK] {msg}")
 
 def print_warning(msg):
     try:
-        print(f"{Fore.YELLOW}{Style.BRIGHT}⚠ {msg}{Style.RESET_ALL}")
-    except UnicodeEncodeError:
         print(f"{Fore.YELLOW}{Style.BRIGHT}[WARNING] {msg}{Style.RESET_ALL}")
+    except UnicodeEncodeError:
+        print(f"[WARNING] {msg}")
 
 def print_error(msg):
     try:
-        print(f"{Fore.RED}{Style.BRIGHT}✗ {msg}{Style.RESET_ALL}")
-    except UnicodeEncodeError:
         print(f"{Fore.RED}{Style.BRIGHT}[ERROR] {msg}{Style.RESET_ALL}")
+    except UnicodeEncodeError:
+        print(f"[ERROR] {msg}")
 
 def print_debug(msg):
     if DEBUG_MODE:
         try:
-            print(f"{Fore.BLUE}{Style.DIM}🔍 {msg}{Style.RESET_ALL}")
-        except UnicodeEncodeError:
             print(f"{Fore.BLUE}{Style.DIM}[DEBUG] {msg}{Style.RESET_ALL}")
+        except UnicodeEncodeError:
+            print(f"[DEBUG] {msg}")
 
 def print_header(msg):
     print(f"\n{Fore.MAGENTA}{Style.BRIGHT}{'='*50}")
@@ -790,7 +790,7 @@ def validate_schedule_with_ors(schedule_df, df, config=None):
                 if ors_travel_time > buffer_minutes:
                     if is_explicit_short_buffer:
                         # User explicitly requested shorter buffer - show warning but don't auto-adjust
-                        warning = f"⚠️ Day {cluster_id + 1}: Travel time to {next_visit['Location']} ({ors_travel_time:.1f} min) exceeds explicitly set buffer time ({buffer_minutes} min)"
+                        warning = f"WARNING: Day {cluster_id + 1}: Travel time to {next_visit['Location']} ({ors_travel_time:.1f} min) exceeds explicitly set buffer time ({buffer_minutes} min)"
                         warnings.append(warning)
                         # Add warning flag to the schedule entry
                         schedule_df.loc[schedule_df['Location'] == next_visit['Location'], 'Buffer_Warning'] = True
@@ -904,6 +904,225 @@ def optimize_routes(df):
     print_info("Optimized routes within each day")
     return optimized_df
 
+def calculate_relocation_cost(location_idx, from_day, to_day, df, day_schedules, config=None):
+    """Calculate the cost of moving a location from one day to another.
+    
+    Cost considers:
+    - Travel time impact on both days
+    - Geographic clustering efficiency
+    - Schedule disruption
+    """
+    if config is None:
+        config = load_config()
+    
+    # Get location data
+    location = df.loc[location_idx]
+    location_coords = (location['latitude'], location['longitude'])
+    
+    # Calculate cost for removing from original day
+    from_day_cost = 0
+    from_day_locations = df[df['cluster'] == from_day]
+    if len(from_day_locations) > 1:
+        # Calculate average distance to other locations on the from_day
+        distances = []
+        for _, other_loc in from_day_locations.iterrows():
+            if other_loc.name != location_idx:
+                other_coords = (other_loc['latitude'], other_loc['longitude'])
+                distances.append(geodesic(location_coords, other_coords).kilometers)
+        if distances:
+            from_day_cost = -np.mean(distances)  # Negative because removing reduces travel
+    
+    # Calculate cost for adding to target day
+    to_day_cost = 0
+    to_day_locations = df[df['cluster'] == to_day]
+    if len(to_day_locations) > 0:
+        # Calculate average distance to other locations on the to_day
+        distances = []
+        for _, other_loc in to_day_locations.iterrows():
+            other_coords = (other_loc['latitude'], other_loc['longitude'])
+            distances.append(geodesic(location_coords, other_coords).kilometers)
+        if distances:
+            to_day_cost = np.mean(distances)  # Positive because adding increases travel
+    
+    # Time constraint penalty - check if the target day has enough time
+    time_penalty = 0
+    visit_hours = config.get('default_visit_hours', 1)
+    buffer_minutes = config.get('default_buffer_minutes', 30)
+    max_end_times = config.get('max_end_times', ['22:00', '22:00'])
+    
+    if to_day < len(max_end_times):
+        current_time = day_schedules.get(to_day, datetime.strptime('09:00', '%H:%M'))
+        end_time = current_time + timedelta(hours=visit_hours)
+        max_end_time = datetime.strptime(max_end_times[to_day], '%H:%M')
+        
+        if end_time > max_end_time:
+            time_penalty = 1000  # High penalty for impossible scheduling
+        else:
+            # Small penalty for tight scheduling
+            remaining_time = (max_end_time - end_time).total_seconds() / 3600
+            if remaining_time < 1:  # Less than 1 hour remaining
+                time_penalty = 50 * (1 - remaining_time)
+    
+    # Total cost is the sum of geographic and time costs
+    total_cost = from_day_cost + to_day_cost + time_penalty
+    
+    if DEBUG_MODE:
+        print_debug(f"Relocation cost for {location['name']} from Day {from_day + 1} to Day {to_day + 1}: "
+                   f"from_day_cost={from_day_cost:.2f}, to_day_cost={to_day_cost:.2f}, "
+                   f"time_penalty={time_penalty:.2f}, total={total_cost:.2f}")
+    
+    return total_cost
+
+def intelligent_reschedule_location(location_idx, original_day, df, day_schedules, config=None):
+    """Intelligently reschedule a location considering geographic proximity and time constraints."""
+    if config is None:
+        config = load_config()
+    
+    dates = config.get('visit_dates', ['July 16, 2024', 'July 17, 2024'])
+    available_days = list(range(len(dates)))
+    
+    # Remove the original day from consideration
+    available_days = [day for day in available_days if day != original_day]
+    
+    if not available_days:
+        return None, float('inf')
+    
+    # Calculate relocation cost for each possible day
+    best_day = None
+    best_cost = float('inf')
+    
+    for candidate_day in available_days:
+        cost = calculate_relocation_cost(location_idx, original_day, candidate_day, df, day_schedules, config)
+        
+        if cost < best_cost:
+            best_cost = cost
+            best_day = candidate_day
+    
+    # Only suggest the move if it's not impossibly expensive (time_penalty < 1000)
+    if best_cost >= 1000:
+        return None, best_cost
+    
+    return best_day, best_cost
+
+def optimize_clusters_with_time_constraints(df, config=None):
+    """Re-optimize clusters after initial scheduling to handle time constraint violations better."""
+    if config is None:
+        config = load_config()
+    
+    print_info("Optimizing clusters with time constraints...")
+    
+    # Get configuration
+    dates = config.get('visit_dates', ['July 16', 'July 17'])
+    start_times = config.get('start_times', ['09:00', '09:00'])
+    max_end_times = config.get('max_end_times', ['22:00', '22:00'])
+    visit_hours = config.get('default_visit_hours', 1)
+    buffer_minutes = config.get('default_buffer_minutes', 30)
+    
+    n_days = len(dates)
+    max_iterations = 5
+    
+    for iteration in range(max_iterations):
+        improved = False
+        
+        # Calculate current day schedules
+        day_schedules = {}
+        day_loads = {}  # Track time load for each day
+        
+        for day in range(n_days):
+            day_locations = df[df['cluster'] == day]
+            total_time = len(day_locations) * (visit_hours + buffer_minutes / 60.0)
+            
+            start_time = datetime.strptime(start_times[day], '%H:%M')
+            max_end_time = datetime.strptime(max_end_times[day], '%H:%M')
+            available_hours = (max_end_time - start_time).total_seconds() / 3600.0
+            
+            day_schedules[day] = start_time
+            day_loads[day] = total_time / available_hours if available_hours > 0 else float('inf')
+        
+        # Find overloaded days
+        overloaded_days = [day for day, load in day_loads.items() if load > 1.0]
+        
+        if not overloaded_days:
+            print_debug(f"Optimization iteration {iteration + 1}: All days within time constraints")
+            break
+        
+        print_debug(f"Optimization iteration {iteration + 1}: Found {len(overloaded_days)} overloaded days")
+        
+        # For each overloaded day, try to move locations to less loaded days
+        for overloaded_day in overloaded_days:
+            day_locations = df[df['cluster'] == overloaded_day]
+            
+            # Sort by priority (move lower priority items first) and distance from day centroid
+            if 'Priority' in day_locations.columns:
+                priority_order = {'High': 0, 'Normal': 1, 'Low': 2}
+                day_locations = day_locations.copy()
+                day_locations['priority_score'] = day_locations['Priority'].map(priority_order).fillna(1)
+            else:
+                day_locations = day_locations.copy()
+                day_locations['priority_score'] = 1
+            
+            # Calculate distance from day centroid for each location
+            if len(day_locations) > 1:
+                centroid_lat = day_locations['latitude'].mean()
+                centroid_lon = day_locations['longitude'].mean()
+                
+                distances_from_centroid = []
+                for _, loc in day_locations.iterrows():
+                    dist = geodesic((centroid_lat, centroid_lon), (loc['latitude'], loc['longitude'])).kilometers
+                    distances_from_centroid.append(dist)
+                day_locations['centroid_distance'] = distances_from_centroid
+            else:
+                day_locations['centroid_distance'] = 0
+            
+            # Sort by priority (low priority first) and distance (far from centroid first)
+            day_locations = day_locations.sort_values(['priority_score', 'centroid_distance'], 
+                                                     ascending=[False, False])
+            
+            # Try to move locations until the day is no longer overloaded
+            for idx, location in day_locations.iterrows():
+                if day_loads[overloaded_day] <= 1.0:
+                    break  # Day is no longer overloaded
+                
+                # Find the best alternative day for this location
+                best_day, best_cost = intelligent_reschedule_location(idx, overloaded_day, df, day_schedules, config)
+                
+                if best_day is not None and best_cost < 1000:
+                    # Move the location
+                    df.loc[idx, 'cluster'] = best_day
+                    improved = True
+                    
+                    # Update day loads
+                    location_time = visit_hours + buffer_minutes / 60.0
+                    
+                    # Remove from overloaded day
+                    old_total_time = day_loads[overloaded_day] * (datetime.strptime(max_end_times[overloaded_day], '%H:%M') - datetime.strptime(start_times[overloaded_day], '%H:%M')).total_seconds() / 3600.0
+                    new_total_time = old_total_time - location_time
+                    available_hours = (datetime.strptime(max_end_times[overloaded_day], '%H:%M') - datetime.strptime(start_times[overloaded_day], '%H:%M')).total_seconds() / 3600.0
+                    day_loads[overloaded_day] = new_total_time / available_hours if available_hours > 0 else 0
+                    
+                    # Add to new day
+                    old_total_time = day_loads[best_day] * (datetime.strptime(max_end_times[best_day], '%H:%M') - datetime.strptime(start_times[best_day], '%H:%M')).total_seconds() / 3600.0
+                    new_total_time = old_total_time + location_time
+                    available_hours = (datetime.strptime(max_end_times[best_day], '%H:%M') - datetime.strptime(start_times[best_day], '%H:%M')).total_seconds() / 3600.0
+                    day_loads[best_day] = new_total_time / available_hours if available_hours > 0 else float('inf')
+                    
+                    if DEBUG_MODE:
+                        print_debug(f"Moved {location['name']} from Day {overloaded_day + 1} to Day {best_day + 1}")
+                        print_debug(f"Day {overloaded_day + 1} load: {day_loads[overloaded_day]:.2f} -> Day {best_day + 1} load: {day_loads[best_day]:.2f}")
+        
+        if not improved:
+            print_debug(f"Optimization iteration {iteration + 1}: No beneficial moves found")
+            break
+    
+    # Final load report
+    for day in range(n_days):
+        load = day_loads[day]
+        status = "OK" if load <= 1.0 else "OVERLOADED"
+        print_debug(f"Final Day {day + 1} load: {load:.2f} ({status})")
+    
+    print_info("Cluster optimization completed")
+    return df
+
 def create_schedule(df, config=None):
     """Create a schedule for the locations."""
     if config is None:
@@ -1000,30 +1219,47 @@ def create_schedule(df, config=None):
                 if DEBUG_MODE:
                     print_debug(f"Location {row['name']} would end at {end_time.strftime('%I:%M %p')} which exceeds max end time {max_end_time.strftime('%I:%M %p')} for day {target_day + 1}")
                 
-                # Try all other days to find available time
-                for try_day in range(len(dates)):
-                    if try_day == target_day:
-                        continue  # Skip the original day that didn't work
+                # Use intelligent rescheduling that considers geographic proximity
+                best_day, best_cost = intelligent_reschedule_location(idx, target_day, df, day_schedules, config)
+                
+                if best_day is not None and best_cost < 1000:
+                    # This day has available time and reasonable geographic cost!
+                    target_day = best_day
+                    current_time = day_schedules[target_day]
+                    end_time = current_time + timedelta(hours=visit_hours)
+                    rescheduled = True
                     
-                    # Calculate what time this would be on the new day
-                    try_current_time = day_schedules[try_day]
-                    try_end_time = try_current_time + timedelta(hours=visit_hours)
-                    try_max_end_time = datetime.strptime(max_end_times[try_day], '%H:%M')
+                    # Update the cluster assignment in the original dataframe
+                    df.loc[idx, 'cluster'] = target_day
                     
-                    if try_end_time <= try_max_end_time:
-                        # This day has available time!
-                        target_day = try_day
-                        current_time = try_current_time
-                        end_time = try_end_time
-                        rescheduled = True
+                    if DEBUG_MODE:
+                        print_debug(f"Intelligently rescheduled {row['name']} from Day {original_target_day + 1} to Day {target_day + 1} at {current_time.strftime('%I:%M %p')} (cost: {best_cost:.2f})")
+                        print_debug(f"  Updated cluster assignment from {original_target_day} to {target_day}")
+                else:
+                    # Fallback to original sequential approach if intelligent rescheduling fails
+                    for try_day in range(len(dates)):
+                        if try_day == target_day:
+                            continue  # Skip the original day that didn't work
                         
-                        # CRITICAL FIX: Update the cluster assignment in the original dataframe
-                        df.loc[idx, 'cluster'] = target_day
+                        # Calculate what time this would be on the new day
+                        try_current_time = day_schedules[try_day]
+                        try_end_time = try_current_time + timedelta(hours=visit_hours)
+                        try_max_end_time = datetime.strptime(max_end_times[try_day], '%H:%M')
                         
-                        if DEBUG_MODE:
-                            print_debug(f"✓ Rescheduled {row['name']} from Day {original_target_day + 1} to Day {target_day + 1} at {current_time.strftime('%I:%M %p')}")
-                            print_debug(f"  Updated cluster assignment from {original_target_day} to {target_day}")
-                        break
+                        if try_end_time <= try_max_end_time:
+                            # This day has available time!
+                            target_day = try_day
+                            current_time = try_current_time
+                            end_time = try_end_time
+                            rescheduled = True
+                            
+                            # Update the cluster assignment in the original dataframe
+                            df.loc[idx, 'cluster'] = target_day
+                            
+                            if DEBUG_MODE:
+                                print_debug(f"Fallback rescheduled {row['name']} from Day {original_target_day + 1} to Day {target_day + 1} at {current_time.strftime('%I:%M %p')}")
+                                print_debug(f"  Updated cluster assignment from {original_target_day} to {target_day}")
+                            break
                 
                 if not rescheduled:
                     if DEBUG_MODE:
@@ -1404,7 +1640,7 @@ def generate_html_output(df, schedule_df, output_dir, filename='location_schedul
             
         cluster_data = df[df['cluster'] == cluster_id].copy()
         cluster_data = cluster_data.sort_index()  # Maintain route order
-        color = colors[int(cluster_id)]
+        color = colors[int(cluster_id) % len(colors)]
         route_coordinates = []
         
         # Add markers
@@ -1887,6 +2123,9 @@ def main():
 
     # Step 4: Cluster locations (only for located addresses)
     df = cluster_locations(df, n_clusters=config.get('clustering', {}).get('n_clusters', 2))
+    
+    # Step 4.5: Optimize clusters with time constraints
+    df = optimize_clusters_with_time_constraints(df, config=config)
     
     # Step 5: Optimize routes
     df = optimize_routes(df)
