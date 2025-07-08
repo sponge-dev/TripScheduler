@@ -815,12 +815,12 @@ def validate_schedule_with_ors(schedule_df, df, config=None):
     return schedule_df, warnings
 
 def cluster_locations(df, n_clusters=2):
-    """Cluster locations into multiple days using K-means."""
+    """Cluster locations into multiple days using K-means with scheduling constraints."""
     if len(df) == 0:
         return df
     
     # Filter out any rows with NaN coordinates
-    df_clean = df.dropna(subset=['latitude', 'longitude'])
+    df_clean = df.dropna(subset=['latitude', 'longitude']).copy()
     
     if len(df_clean) == 0:
         print_warning("No valid coordinates found for clustering")
@@ -830,19 +830,139 @@ def cluster_locations(df, n_clusters=2):
         print_warning(f"Not enough locations ({len(df_clean)}) for {n_clusters} clusters. Using {len(df_clean)} clusters instead.")
         n_clusters = len(df_clean)
     
-    # Extract coordinates
-    coords = df_clean[['latitude', 'longitude']].values
+    # Initialize cluster assignments
+    df_clean['cluster'] = -1  # -1 means unassigned
     
-    # Perform K-means clustering
-    kmeans = KMeans(n_clusters=n_clusters, random_state=42)
-    df_clean['cluster'] = kmeans.fit_predict(coords)
+    # Step 1: Handle user-specified Scheduled_Day constraints
+    assigned_count = 0
+    if 'Scheduled_Day' in df_clean.columns:
+        for idx, row in df_clean.iterrows():
+            scheduled_day = str(row.get('Scheduled_Day', '')).strip()
+            if scheduled_day and scheduled_day.lower() != 'any':
+                # Parse scheduled day
+                if scheduled_day.lower().startswith('day '):
+                    try:
+                        day_num = int(scheduled_day.split()[1]) - 1  # Convert to 0-based
+                        if 0 <= day_num < n_clusters:
+                            df_clean.loc[idx, 'cluster'] = day_num
+                            assigned_count += 1
+                            if DEBUG_MODE:
+                                print_debug(f"Assigned '{row['name']}' to {scheduled_day} (cluster {day_num})")
+                    except (ValueError, IndexError):
+                        if DEBUG_MODE:
+                            print_debug(f"Invalid scheduled_day format: '{scheduled_day}' for '{row['name']}'")
+    
+    print_info(f"Pre-assigned {assigned_count} locations based on Scheduled_Day constraints")
+    
+    # Step 2: Cluster remaining unassigned locations geographically
+    unassigned_mask = df_clean['cluster'] == -1
+    unassigned_df = df_clean[unassigned_mask]
+    
+    if len(unassigned_df) > 0:
+        # Extract coordinates for unassigned locations
+        coords = unassigned_df[['latitude', 'longitude']].values
+        
+        # Calculate how many clusters we need for unassigned locations
+        # Consider current cluster usage
+        used_clusters = set(df_clean[df_clean['cluster'] != -1]['cluster'].values)
+        available_clusters = [i for i in range(n_clusters) if i not in used_clusters]
+        
+        if len(available_clusters) == 0:
+            # All clusters are used, distribute among existing clusters
+            available_clusters = list(range(n_clusters))
+        
+        # Perform K-means clustering for unassigned locations
+        if len(unassigned_df) <= len(available_clusters):
+            # If we have fewer unassigned locations than available clusters, assign directly
+            for i, (idx, row) in enumerate(unassigned_df.iterrows()):
+                cluster_id = available_clusters[i % len(available_clusters)]
+                df_clean.loc[idx, 'cluster'] = cluster_id
+        else:
+            # Use K-means to cluster unassigned locations
+            kmeans_clusters = min(len(available_clusters), len(unassigned_df))
+            kmeans = KMeans(n_clusters=kmeans_clusters, random_state=42)
+            cluster_assignments = kmeans.fit_predict(coords)
+            
+            # Map K-means cluster IDs to available cluster IDs
+            for i, (idx, row) in enumerate(unassigned_df.iterrows()):
+                kmeans_cluster = cluster_assignments[i]
+                actual_cluster = available_clusters[kmeans_cluster % len(available_clusters)]
+                df_clean.loc[idx, 'cluster'] = actual_cluster
+    
+    # Step 3: Consider Priority levels for final adjustments
+    if 'Priority' in df_clean.columns:
+        # Count locations per cluster
+        cluster_counts = df_clean['cluster'].value_counts()
+        
+        # Try to balance high priority locations across days
+        high_priority_locations = df_clean[df_clean['Priority'] == 'High']
+        if len(high_priority_locations) > 1:
+            # If we have multiple high priority locations, spread them across days
+            day_assignments = {}
+            for cluster_id in range(n_clusters):
+                day_assignments[cluster_id] = []
+            
+            # Group current high priority locations by cluster
+            for idx, row in high_priority_locations.iterrows():
+                cluster_id = row['cluster']
+                day_assignments[cluster_id].append(idx)
+            
+            # Find clusters with too many high priority locations
+            for cluster_id, locations in day_assignments.items():
+                if len(locations) > 1:
+                    # Keep the first one, try to move others
+                    for i in range(1, len(locations)):
+                        location_idx = locations[i]
+                        location = df_clean.loc[location_idx]
+                        
+                        # Find the least loaded cluster that doesn't have high priority
+                        target_cluster = None
+                        min_high_priority_count = float('inf')
+                        
+                        for alt_cluster in range(n_clusters):
+                            if alt_cluster != cluster_id:
+                                alt_high_priority_count = len(day_assignments[alt_cluster])
+                                if alt_high_priority_count < min_high_priority_count:
+                                    min_high_priority_count = alt_high_priority_count
+                                    target_cluster = alt_cluster
+                        
+                        if target_cluster is not None and min_high_priority_count < len(day_assignments[cluster_id]):
+                            # Move the location
+                            df_clean.loc[location_idx, 'cluster'] = target_cluster
+                            day_assignments[cluster_id].remove(location_idx)
+                            day_assignments[target_cluster].append(location_idx)
+                            if DEBUG_MODE:
+                                print_debug(f"Moved high priority location '{location['name']}' from Day {cluster_id + 1} to Day {target_cluster + 1} for better balance")
     
     # Merge back with original dataframe to preserve all rows
     df = df.merge(df_clean[['latitude', 'longitude', 'cluster']], 
                   on=['latitude', 'longitude'], 
                   how='left')
     
+    # Report final cluster distribution
+    cluster_counts = df['cluster'].value_counts().sort_index()
+    distribution_info = []
+    for cluster_id in range(n_clusters):
+        count = cluster_counts.get(cluster_id, 0)
+        distribution_info.append(f"Day {cluster_id + 1}: {count} locations")
+    
     print_info(f"Clustered {len(df_clean)} locations into {n_clusters} days")
+    print_info(f"Distribution: {', '.join(distribution_info)}")
+    
+    # Report on constraint handling
+    if assigned_count > 0:
+        print_info(f"Scheduling constraints: {assigned_count} explicit day assignments honored")
+    
+    if 'Priority' in df_clean.columns:
+        priority_counts = df_clean['Priority'].value_counts()
+        priority_info = []
+        for priority in ['High', 'Normal', 'Low']:
+            count = priority_counts.get(priority, 0)
+            if count > 0:
+                priority_info.append(f"{priority}: {count}")
+        if priority_info:
+            print_info(f"Priority distribution: {', '.join(priority_info)}")
+    
     return df
 
 def calculate_distance_matrix(coords):
@@ -977,6 +1097,16 @@ def intelligent_reschedule_location(location_idx, original_day, df, day_schedule
     """Intelligently reschedule a location considering geographic proximity and time constraints."""
     if config is None:
         config = load_config()
+    
+    # Check if this location has explicit Scheduled_Day constraints
+    location = df.loc[location_idx]
+    if 'Scheduled_Day' in location.index:
+        scheduled_day = str(location.get('Scheduled_Day', '')).strip()
+        if scheduled_day and scheduled_day.lower() != 'any':
+            # This location has explicit day constraints - don't move it
+            if DEBUG_MODE:
+                print_debug(f"Location '{location['name']}' has explicit Scheduled_Day constraint: '{scheduled_day}' - cannot reschedule")
+            return None, float('inf')
     
     dates = config.get('visit_dates', ['July 16, 2024', 'July 17, 2024'])
     available_days = list(range(len(dates)))
