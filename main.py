@@ -735,6 +735,120 @@ def calculate_ors_travel_times(df, config=None, cache_file='ors_cache.json'):
     
     return df
 
+def recalculate_ors_for_schedule(df, schedule_df, config=None):
+    """Recalculate ORS travel times based on actual schedule order after rescheduling."""
+    if config is None:
+        config = load_config()
+    
+    ors_client = load_ors_client(config)
+    if not ors_client:
+        if DEBUG_MODE:
+            print_debug("ORS client not available, skipping schedule-based recalculation")
+        return df
+    
+    # Load ORS cache if exists
+    cache_file = 'ors_cache.json'
+    if os.path.exists(cache_file):
+        with open(cache_file, 'r', encoding='utf-8') as f:
+            ors_cache = json.load(f)
+    else:
+        ors_cache = {}
+    
+    print_info("Recalculating ORS travel times based on final schedule order...")
+    
+    # Clear existing ORS data
+    df['ors_travel_time_minutes'] = 0.0
+    df['ors_travel_distance_km'] = 0.0
+    df['ors_directions'] = ''
+    df['ors_route_geometry'] = ''
+    
+    ors_config = config.get('ors', {})
+    rate_limit_delay = ors_config.get('rate_limit_delay', 0.5)
+    
+    try:
+        # Process each day in the schedule
+        for date in sorted(schedule_df['Date'].unique()):
+            day_schedule = schedule_df[schedule_df['Date'] == date]
+            
+            # Sort by start time to ensure chronological order for route calculations
+            def extract_start_time(time_str):
+                """Extract start time from 'HH:MM AM/PM - HH:MM AM/PM' format for sorting."""
+                try:
+                    start_time_str = time_str.split(' - ')[0]
+                    return datetime.strptime(start_time_str, '%I:%M %p').time()
+                except:
+                    return datetime.strptime('12:00 AM', '%I:%M %p').time()  # Default fallback
+            
+            day_schedule = day_schedule.copy()
+            day_schedule['_sort_time'] = day_schedule['Time'].apply(extract_start_time)
+            day_schedule = day_schedule.sort_values('_sort_time').reset_index(drop=True)
+            
+            if len(day_schedule) < 2:
+                continue
+            
+            # Get coordinates for this day in chronological order
+            coords = []
+            locations = []
+            
+            for _, visit in day_schedule.iterrows():
+                # Find the corresponding row in the main DataFrame
+                match = df[(df['name'] == visit['Location']) & (df['address'] == visit['Address'])]
+                if not match.empty:
+                    row = match.iloc[0]
+                    coords.append([row['latitude'], row['longitude']])
+                    locations.append(row.name)  # Store the DataFrame index
+            
+            # Calculate travel times between consecutive locations in schedule order
+            for i in range(len(coords) - 1):
+                current_coords = [coords[i], coords[i + 1]]
+                next_location_idx = locations[i + 1]
+                
+                # Create cache key from coordinates
+                cache_key = f"{current_coords[0][0]:.6f},{current_coords[0][1]:.6f}_to_{current_coords[1][0]:.6f},{current_coords[1][1]:.6f}_{ors_config.get('profile', 'driving-car')}"
+                
+                # Check cache first
+                route_info = None
+                if cache_key in ors_cache:
+                    route_info = ors_cache[cache_key]
+                    if DEBUG_MODE:
+                        print_debug(f"Using cached ORS data for schedule route segment")
+                else:
+                    # Get route info from ORS API
+                    route_info = get_ors_route_info(ors_client, current_coords, config)
+                    if route_info:
+                        # Cache the result
+                        ors_cache[cache_key] = route_info
+                        if DEBUG_MODE:
+                            print_debug(f"Cached ORS data for schedule route segment")
+                    
+                    # Rate limiting only when making API calls
+                    time.sleep(rate_limit_delay)
+                
+                if route_info:
+                    # Store the travel time to reach the next location
+                    df.at[next_location_idx, 'ors_travel_time_minutes'] = route_info['duration_minutes']
+                    df.at[next_location_idx, 'ors_travel_distance_km'] = route_info['distance_km']
+                    df.at[next_location_idx, 'ors_directions'] = json.dumps(route_info['directions'])
+                    df.at[next_location_idx, 'ors_route_geometry'] = json.dumps(route_info['route_geometry'])
+                    
+                    if DEBUG_MODE:
+                        print_debug(f"Schedule order: Travel time to {df.at[next_location_idx, 'name']}: {route_info['duration_minutes']:.1f} min, {route_info['distance_km']:.1f} km")
+    
+    except Exception as e:
+        print_error(f"Error recalculating ORS travel times for schedule: {e}")
+    finally:
+        # Save ORS cache
+        try:
+            with open(cache_file, 'w', encoding='utf-8') as f:
+                json.dump(ors_cache, f, indent=2)
+            if DEBUG_MODE:
+                print_debug(f"ORS cache updated with schedule-based routes")
+        except Exception as e:
+            if DEBUG_MODE:
+                print_debug(f"Error saving ORS cache: {e}")
+    
+    return df
+
 def validate_schedule_with_ors(schedule_df, df, config=None):
     """Validate that the schedule fits within time constraints using ORS travel times."""
     if config is None:
@@ -837,7 +951,17 @@ def cluster_locations(df, n_clusters=2):
     assigned_count = 0
     if 'Scheduled_Day' in df_clean.columns:
         for idx, row in df_clean.iterrows():
-            scheduled_day = str(row.get('Scheduled_Day', '')).strip()
+            scheduled_day_raw = row.get('Scheduled_Day', '')
+            # Properly handle NaN values from pandas
+            if pd.isna(scheduled_day_raw):
+                scheduled_day = ''
+            else:
+                scheduled_day = str(scheduled_day_raw).strip()
+            
+            # Additional check for string 'nan' that can sometimes occur
+            if scheduled_day.lower() == 'nan':
+                scheduled_day = ''
+            
             if scheduled_day and scheduled_day.lower() != 'any':
                 # Parse scheduled day
                 if scheduled_day.lower().startswith('day '):
@@ -1073,7 +1197,8 @@ def calculate_relocation_cost(location_idx, from_day, to_day, df, day_schedules,
     if to_day < len(max_end_times):
         current_time = day_schedules.get(to_day, datetime.strptime('09:00', '%H:%M'))
         end_time = current_time + timedelta(hours=visit_hours)
-        max_end_time = datetime.strptime(max_end_times[to_day], '%H:%M')
+        max_end_time_str = max_end_times[to_day] if to_day < len(max_end_times) else (max_end_times[-1] if max_end_times else '22:00')
+        max_end_time = datetime.strptime(max_end_time_str, '%H:%M')
         
         if end_time > max_end_time:
             time_penalty = 1000  # High penalty for impossible scheduling
@@ -1101,8 +1226,14 @@ def intelligent_reschedule_location(location_idx, original_day, df, day_schedule
     # Check if this location has explicit Scheduled_Day constraints
     location = df.loc[location_idx]
     if 'Scheduled_Day' in location.index:
-        scheduled_day = str(location.get('Scheduled_Day', '')).strip()
-        if scheduled_day and scheduled_day.lower() != 'any':
+        scheduled_day_raw = location.get('Scheduled_Day', '')
+        # Properly handle NaN values from pandas
+        if pd.isna(scheduled_day_raw):
+            scheduled_day = ''
+        else:
+            scheduled_day = str(scheduled_day_raw).strip()
+        
+        if scheduled_day and scheduled_day.lower() not in ['any', 'nan']:
             # This location has explicit day constraints - don't move it
             if DEBUG_MODE:
                 print_debug(f"Location '{location['name']}' has explicit Scheduled_Day constraint: '{scheduled_day}' - cannot reschedule")
@@ -1160,10 +1291,18 @@ def optimize_clusters_with_time_constraints(df, config=None):
         
         for day in range(n_days):
             day_locations = df[df['cluster'] == day]
-            total_time = len(day_locations) * (visit_hours + buffer_minutes / 60.0)
+            # Calculate total time: visit time for all locations + travel time between them
+            # Note: travel time is only needed between locations (n-1 transitions for n locations)
+            visit_time = len(day_locations) * visit_hours
+            travel_time = max(0, len(day_locations) - 1) * (buffer_minutes / 60.0)
+            total_time = visit_time + travel_time
             
-            start_time = datetime.strptime(start_times[day], '%H:%M')
-            max_end_time = datetime.strptime(max_end_times[day], '%H:%M')
+            # Ensure we have start_times and max_end_times for each day
+            start_time_str = start_times[day] if day < len(start_times) else (start_times[-1] if start_times else '09:00')
+            max_end_time_str = max_end_times[day] if day < len(max_end_times) else (max_end_times[-1] if max_end_times else '22:00')
+            
+            start_time = datetime.strptime(start_time_str, '%H:%M')
+            max_end_time = datetime.strptime(max_end_time_str, '%H:%M')
             available_hours = (max_end_time - start_time).total_seconds() / 3600.0
             
             day_schedules[day] = start_time
@@ -1222,18 +1361,23 @@ def optimize_clusters_with_time_constraints(df, config=None):
                     improved = True
                     
                     # Update day loads
-                    location_time = visit_hours + buffer_minutes / 60.0
+                    # Each location requires visit time + travel time (if not the last location)
+                    location_time = visit_hours + (buffer_minutes / 60.0)
                     
                     # Remove from overloaded day
-                    old_total_time = day_loads[overloaded_day] * (datetime.strptime(max_end_times[overloaded_day], '%H:%M') - datetime.strptime(start_times[overloaded_day], '%H:%M')).total_seconds() / 3600.0
+                    overloaded_start_str = start_times[overloaded_day] if overloaded_day < len(start_times) else (start_times[-1] if start_times else '09:00')
+                    overloaded_end_str = max_end_times[overloaded_day] if overloaded_day < len(max_end_times) else (max_end_times[-1] if max_end_times else '22:00')
+                    old_total_time = day_loads[overloaded_day] * (datetime.strptime(overloaded_end_str, '%H:%M') - datetime.strptime(overloaded_start_str, '%H:%M')).total_seconds() / 3600.0
                     new_total_time = old_total_time - location_time
-                    available_hours = (datetime.strptime(max_end_times[overloaded_day], '%H:%M') - datetime.strptime(start_times[overloaded_day], '%H:%M')).total_seconds() / 3600.0
+                    available_hours = (datetime.strptime(overloaded_end_str, '%H:%M') - datetime.strptime(overloaded_start_str, '%H:%M')).total_seconds() / 3600.0
                     day_loads[overloaded_day] = new_total_time / available_hours if available_hours > 0 else 0
                     
                     # Add to new day
-                    old_total_time = day_loads[best_day] * (datetime.strptime(max_end_times[best_day], '%H:%M') - datetime.strptime(start_times[best_day], '%H:%M')).total_seconds() / 3600.0
+                    best_start_str = start_times[best_day] if best_day < len(start_times) else (start_times[-1] if start_times else '09:00')
+                    best_end_str = max_end_times[best_day] if best_day < len(max_end_times) else (max_end_times[-1] if max_end_times else '22:00')
+                    old_total_time = day_loads[best_day] * (datetime.strptime(best_end_str, '%H:%M') - datetime.strptime(best_start_str, '%H:%M')).total_seconds() / 3600.0
                     new_total_time = old_total_time + location_time
-                    available_hours = (datetime.strptime(max_end_times[best_day], '%H:%M') - datetime.strptime(start_times[best_day], '%H:%M')).total_seconds() / 3600.0
+                    available_hours = (datetime.strptime(best_end_str, '%H:%M') - datetime.strptime(best_start_str, '%H:%M')).total_seconds() / 3600.0
                     day_loads[best_day] = new_total_time / available_hours if available_hours > 0 else float('inf')
                     
                     if DEBUG_MODE:
@@ -1259,6 +1403,7 @@ def create_schedule(df, config=None):
         config = load_config()
     
     schedule = []
+    unscheduled_items = []  # Track items that couldn't be scheduled
     
     # Define visit dates from config
     dates = config.get('visit_dates', ['July 16, 2024', 'July 17, 2024'])
@@ -1274,7 +1419,17 @@ def create_schedule(df, config=None):
     
     # Initialize day schedules
     for i in range(len(dates)):
-        day_schedules[i] = datetime.strptime(start_times[i], '%H:%M')
+        # Ensure we have start_times for each day
+        if i < len(start_times):
+            start_time_str = start_times[i]
+        else:
+            # Fallback to last available start time or default
+            start_time_str = start_times[-1] if start_times else '09:00'
+        
+        day_schedules[i] = datetime.strptime(start_time_str, '%H:%M')
+        
+        if DEBUG_MODE:
+            print_debug(f"Day {i + 1} ({dates[i]}) starts at {start_time_str} ({day_schedules[i].strftime('%I:%M %p')})")
     
     # Process high priority and specifically scheduled items first
     for cluster_id in df['cluster'].dropna().unique():
@@ -1301,6 +1456,10 @@ def create_schedule(df, config=None):
             scheduled_day = str(scheduled_day_raw).strip() if pd.notna(scheduled_day_raw) else ''
             scheduled_time = str(scheduled_time_raw).strip() if pd.notna(scheduled_time_raw) else ''
             
+            # Additional check for string 'nan' that can sometimes occur
+            if scheduled_day.lower() == 'nan':
+                scheduled_day = ''
+            
             # Determine target day
             target_day = None
             if scheduled_day:
@@ -1325,7 +1484,8 @@ def create_schedule(df, config=None):
             # Determine target time
             target_time = None
             if scheduled_time:
-                target_time = parse_scheduled_time(scheduled_time, start_times[target_day])
+                target_start_str = start_times[target_day] if target_day < len(start_times) else (start_times[-1] if start_times else '09:00')
+                target_time = parse_scheduled_time(scheduled_time, target_start_str)
             
             # Use target time if specified, otherwise use current time for that day
             if target_time:
@@ -1339,15 +1499,20 @@ def create_schedule(df, config=None):
             # Calculate end time for this visit
             end_time = current_time + timedelta(hours=visit_hours)
             
-            # Check if this visit would exceed max end time for this day
-            max_end_time = datetime.strptime(max_end_times[target_day], '%H:%M')
-            if end_time > max_end_time:
+            # Calculate when we need to leave (visit end + travel time to next location)
+            # Buffer time represents travel time to the NEXT location
+            departure_time = end_time + timedelta(minutes=buffer_minutes)
+            
+            # Check if this visit + travel time would exceed max end time for this day
+            target_end_str = max_end_times[target_day] if target_day < len(max_end_times) else (max_end_times[-1] if max_end_times else '22:00')
+            max_end_time = datetime.strptime(target_end_str, '%H:%M')
+            if departure_time > max_end_time:
                 # Try to reschedule to another day with available time
                 rescheduled = False
                 original_target_day = target_day
                 
                 if DEBUG_MODE:
-                    print_debug(f"Location {row['name']} would end at {end_time.strftime('%I:%M %p')} which exceeds max end time {max_end_time.strftime('%I:%M %p')} for day {target_day + 1}")
+                    print_debug(f"Location {row['name']} would need departure by {departure_time.strftime('%I:%M %p')} (visit ends {end_time.strftime('%I:%M %p')} + {buffer_minutes}min travel) which exceeds max end time {max_end_time.strftime('%I:%M %p')} for day {target_day + 1}")
                 
                 # Use intelligent rescheduling that considers geographic proximity
                 best_day, best_cost = intelligent_reschedule_location(idx, target_day, df, day_schedules, config)
@@ -1374,7 +1539,8 @@ def create_schedule(df, config=None):
                         # Calculate what time this would be on the new day
                         try_current_time = day_schedules[try_day]
                         try_end_time = try_current_time + timedelta(hours=visit_hours)
-                        try_max_end_time = datetime.strptime(max_end_times[try_day], '%H:%M')
+                        try_end_str = max_end_times[try_day] if try_day < len(max_end_times) else (max_end_times[-1] if max_end_times else '22:00')
+                        try_max_end_time = datetime.strptime(try_end_str, '%H:%M')
                         
                         if try_end_time <= try_max_end_time:
                             # This day has available time!
@@ -1394,6 +1560,15 @@ def create_schedule(df, config=None):
                 if not rescheduled:
                     if DEBUG_MODE:
                         print_debug(f"[X] Unable to reschedule {row['name']} - no available time on any day")
+                    # Add to unscheduled items instead of skipping
+                    unscheduled_items.append({
+                        'Location': row['name'],
+                        'Address': row['address'],
+                        'Price/Cost': row['price_info'],
+                        'Priority': row.get('Priority', 'Normal'),
+                        'Notes': row.get('Notes', ''),
+                        'Reason': 'No available time slots on any day'
+                    })
                     continue
             
             schedule.append({
@@ -1411,10 +1586,20 @@ def create_schedule(df, config=None):
             scheduled_locations.add(idx)
             
             # Update the day schedule time only if we didn't use a specific time
+            # The next appointment can start when we're done with this visit + travel time
             if not target_time:
-                day_schedules[target_day] = end_time + timedelta(minutes=buffer_minutes)
+                day_schedules[target_day] = departure_time
     
-    return pd.DataFrame(schedule)
+    schedule_df = pd.DataFrame(schedule)
+    unscheduled_df = pd.DataFrame(unscheduled_items)
+    
+    # Print summary
+    if len(unscheduled_items) > 0:
+        print_warning(f"Unable to schedule {len(unscheduled_items)} locations due to time constraints:")
+        for item in unscheduled_items:
+            print_warning(f"  - {item['Location']}: {item['Reason']}")
+    
+    return schedule_df, unscheduled_df
 
 def parse_scheduled_time(time_str, default_start_time):
     """Parse scheduled time string into datetime object."""
@@ -1485,10 +1670,12 @@ def suggest_visit_times_for_unlocated(unlocated_df, schedule_df, config=None):
                 day_end_times[day_idx] = latest_end_time + timedelta(minutes=buffer_minutes)
             else:
                 # Fallback to start time
-                day_end_times[day_idx] = datetime.strptime(start_times[day_idx], '%H:%M')
+                start_str = start_times[day_idx] if day_idx < len(start_times) else (start_times[-1] if start_times else '09:00')
+                day_end_times[day_idx] = datetime.strptime(start_str, '%H:%M')
         else:
             # No scheduled visits for this day, use start time
-            day_end_times[day_idx] = datetime.strptime(start_times[day_idx], '%H:%M')
+            start_str = start_times[day_idx] if day_idx < len(start_times) else (start_times[-1] if start_times else '09:00')
+            day_end_times[day_idx] = datetime.strptime(start_str, '%H:%M')
     
     # Try to use OpenAI for intelligent suggestions
     try:
@@ -1502,8 +1689,10 @@ def suggest_visit_times_for_unlocated(unlocated_df, schedule_df, config=None):
                 schedule_context = "Current Schedule:\n"
                 for day_idx in range(n_clusters):
                     day_schedule = schedule_df[schedule_df['Cluster'] == f"Day {day_idx + 1}"]
+                    start_str = start_times[day_idx] if day_idx < len(start_times) else (start_times[-1] if start_times else '09:00')
+                    end_str = max_end_times[day_idx] if day_idx < len(max_end_times) else (max_end_times[-1] if max_end_times else '22:00')
                     schedule_context += f"\nDay {day_idx + 1} ({dates[day_idx]}):\n"
-                    schedule_context += f"  Start: {start_times[day_idx]}, End: {max_end_times[day_idx]}\n"
+                    schedule_context += f"  Start: {start_str}, End: {end_str}\n"
                     schedule_context += f"  Next available: {day_end_times[day_idx].strftime('%I:%M %p')}\n"
                     if len(day_schedule) > 0:
                         schedule_context += "  Scheduled visits:\n"
@@ -1528,8 +1717,9 @@ def suggest_visit_times_for_unlocated(unlocated_df, schedule_df, config=None):
                 # Build prompt for unlocated addresses
                 unlocated_list = []
                 for _, row in unlocated_df.iterrows():
-                    location_name = row.get('Apartment', row.get('name', 'Unknown Location'))
-                    unlocated_list.append(f"{location_name}: {row['address']}")
+                    location_name = row.get('Apartment', row.get('Location', row.get('name', 'Unknown Location')))
+                    address = row.get('Address', row.get('address', 'Unknown Address'))
+                    unlocated_list.append(f"{location_name}: {address}")
                 
                 prompt = f"""You are a scheduling assistant. Given the current schedule and unlocated addresses, suggest optimal visit times.
 
@@ -1575,8 +1765,9 @@ If impossible to schedule within constraints, respond with:
     suggestions = []
     
     for _, row in unlocated_df.iterrows():
-        location_name = row.get('Apartment', row.get('name', 'Unknown Location'))
-        full_label = f"{location_name}: {row['address']}"
+        location_name = row.get('Apartment', row.get('Location', row.get('name', 'Unknown Location')))
+        address = row.get('Address', row.get('address', 'Unknown Address'))
+        full_label = f"{location_name}: {address}"
         
         # Find the best day for this address
         best_day = None
@@ -1584,16 +1775,17 @@ If impossible to schedule within constraints, respond with:
         impossible_all_days = True
         
         for day_idx in range(n_clusters):
-            start_time = start_times[day_idx]
-            max_end_time = max_end_times[day_idx]
+            start_time = start_times[day_idx] if day_idx < len(start_times) else (start_times[-1] if start_times else '09:00')
+            max_end_time = max_end_times[day_idx] if day_idx < len(max_end_times) else (max_end_times[-1] if max_end_times else '22:00')
             date = dates[day_idx]
             current_time = day_end_times[day_idx]
             
-            # Check if we can fit this visit on this day
+            # Check if we can fit this visit on this day (including travel time after visit)
             visit_end_time = current_time + timedelta(hours=visit_hours)
+            departure_time = visit_end_time + timedelta(minutes=buffer_minutes)
             max_end_dt = datetime.strptime(max_end_time, '%H:%M')
             
-            if visit_end_time <= max_end_dt:
+            if departure_time <= max_end_dt:
                 # This day works!
                 best_day = day_idx
                 best_time = current_time
@@ -1603,7 +1795,8 @@ If impossible to schedule within constraints, respond with:
         if impossible_all_days:
             # Try to find any day with some time available, even if it's at the very end
             for day_idx in range(n_clusters):
-                max_end_dt = datetime.strptime(max_end_times[day_idx], '%H:%M')
+                end_str = max_end_times[day_idx] if day_idx < len(max_end_times) else (max_end_times[-1] if max_end_times else '22:00')
+                max_end_dt = datetime.strptime(end_str, '%H:%M')
                 if day_end_times[day_idx] < max_end_dt:
                     best_day = day_idx
                     best_time = max_end_dt - timedelta(hours=visit_hours)
@@ -1624,14 +1817,27 @@ If impossible to schedule within constraints, respond with:
 
 def create_side_by_side_schedule_html(schedule_df, df=None):
     """Create HTML for schedule with days displayed side by side."""
-    # Group by date
-    dates = schedule_df['Date'].unique()
+    # Group by date and sort chronologically
+    dates = sorted(schedule_df['Date'].unique())
     
     html_parts = []
     
     # Create a row for each day
     for date in dates:
         day_data = schedule_df[schedule_df['Date'] == date]
+        
+        # Sort by start time to ensure chronological order
+        def extract_start_time(time_str):
+            """Extract start time from 'HH:MM AM/PM - HH:MM AM/PM' format for sorting."""
+            try:
+                start_time_str = time_str.split(' - ')[0]
+                return datetime.strptime(start_time_str, '%I:%M %p').time()
+            except:
+                return datetime.strptime('12:00 AM', '%I:%M %p').time()  # Default fallback
+        
+        day_data = day_data.copy()
+        day_data['_sort_time'] = day_data['Time'].apply(extract_start_time)
+        day_data = day_data.sort_values('_sort_time')
         
         day_html = f"""
         <div class="day-column">
@@ -1887,10 +2093,24 @@ def prepare_directions_data(df, schedule_df, config=None):
     directions_data = {}
     day_options = ""
     
-    # Process each day
-    for day_idx, date in enumerate(schedule_df['Date'].unique()):
+    # Process each day in chronological order
+    for day_idx, date in enumerate(sorted(schedule_df['Date'].unique())):
         day_name = f"day{day_idx + 1}"
-        day_schedule = schedule_df[schedule_df['Date'] == date].reset_index(drop=True)
+        day_schedule = schedule_df[schedule_df['Date'] == date]
+        
+        # Sort by start time to ensure chronological order for directions
+        def extract_start_time(time_str):
+            """Extract start time from 'HH:MM AM/PM - HH:MM AM/PM' format for sorting."""
+            try:
+                start_time_str = time_str.split(' - ')[0]
+                return datetime.strptime(start_time_str, '%I:%M %p').time()
+            except:
+                return datetime.strptime('12:00 AM', '%I:%M %p').time()  # Default fallback
+        
+        day_schedule = day_schedule.copy()
+        day_schedule['_sort_time'] = day_schedule['Time'].apply(extract_start_time)
+        day_schedule = day_schedule.sort_values('_sort_time').reset_index(drop=True)
+        
         day_options += f'<option value="{day_name}">Day {day_idx + 1} ({date})</option>'
         
         if len(day_schedule) < 2:
@@ -1978,7 +2198,7 @@ def generate_map_legend_html(schedule_df):
     }
     
     legend_html = ""
-    dates = schedule_df['Date'].unique()
+    dates = sorted(schedule_df['Date'].unique())
     
     for day_idx, date in enumerate(dates):
         color_name = colors[day_idx % len(colors)]
@@ -2006,16 +2226,32 @@ def generate_combined_html_output(df, schedule_df, output_dir, filename='locatio
     colors = ['red', 'blue', 'green', 'purple', 'orange', 'darkred', 'lightred', 'beige', 'darkblue', 'darkgreen', 'cadetblue', 'darkpurple', 'white', 'pink', 'lightblue', 'lightgreen', 'gray', 'black', 'lightgray']
 
     # For each day, get the route order from schedule_df and add markers and routes
-    for day_idx, date in enumerate(schedule_df['Date'].unique()):
-        day_schedule = schedule_df[schedule_df['Date'] == date].reset_index(drop=True)
+    for day_idx, date in enumerate(sorted(schedule_df['Date'].unique())):
+        day_schedule = schedule_df[schedule_df['Date'] == date]
+        
+        # Sort by start time to ensure chronological order on map
+        def extract_start_time(time_str):
+            """Extract start time from 'HH:MM AM/PM - HH:MM AM/PM' format for sorting."""
+            try:
+                start_time_str = time_str.split(' - ')[0]
+                return datetime.strptime(start_time_str, '%I:%M %p').time()
+            except:
+                return datetime.strptime('12:00 AM', '%I:%M %p').time()  # Default fallback
+        
+        day_schedule = day_schedule.copy()
+        day_schedule['_sort_time'] = day_schedule['Time'].apply(extract_start_time)
+        day_schedule = day_schedule.sort_values('_sort_time').reset_index(drop=True)
+        
         route_coordinates = []
+        
+        # Use consistent day_idx for coloring both markers and routes
+        day_color = colors[day_idx % len(colors)]
         
         for order, visit in day_schedule.iterrows():
             match = df[(df['name'] == visit['Location']) & (df['address'] == visit['Address'])]
             if not match.empty:
                 row = match.iloc[0]
                 cluster_id = row['cluster'] if not pd.isna(row['cluster']) else 0
-                color = colors[int(cluster_id) % len(colors)]
                 
                 # Add coordinates to route
                 route_coordinates.append([row['latitude'], row['longitude']])
@@ -2025,20 +2261,19 @@ def generate_combined_html_output(df, schedule_df, output_dir, filename='locatio
                 Address: {row['address']}<br>
                 Price/Cost: {row['price_info']}<br>
                 <b>Visit Time:</b> {visit['Time']}<br>
-                Day: {int(cluster_id) + 1 if not pd.isna(cluster_id) else 'N/A'}
+                Day: {day_idx + 1} ({date})
                 """
                 marker = folium.Marker(
                     [row['latitude'], row['longitude']],
                     popup=folium.Popup(popup_text, max_width=300),
-                    tooltip=f"{row['name']} (Day {int(cluster_id) + 1 if not pd.isna(cluster_id) else 'N/A'})",
-                    icon=folium.Icon(color=color, icon='home')
+                    tooltip=f"{row['name']} (Day {day_idx + 1})",
+                    icon=folium.Icon(color=day_color, icon='home')
                 )
                 marker.add_to(m)
         
         # Add route lines between consecutive locations for this day
         if len(route_coordinates) > 1:
-            cluster_id = day_idx  # Use day index as cluster ID for coloring
-            route_color = colors[cluster_id % len(colors)]
+            route_color = day_color  # Use same color as markers
             
             # Try to use actual route geometry if available, otherwise use straight lines
             for i in range(len(day_schedule) - 1):
@@ -2099,36 +2334,77 @@ def generate_combined_html_output(df, schedule_df, output_dir, filename='locatio
     # Create schedule HTML with days side by side
     schedule_html = create_side_by_side_schedule_html(schedule_df, df)
 
-    # --- Fix unlocated section to show correct name ---
+    # --- Create unscheduled section with prominent styling ---
     unlocated_section = ""
     if unlocated_df is not None and len(unlocated_df) > 0:
-        # Prefer original name column if present, else fallback to 'name'
-        name_col = None
-        for col in unlocated_df.columns:
-            if col.lower() in ['apartment', 'event', 'location', 'name', 'venue', 'place']:
-                name_col = col
-                break
-        if not name_col:
-            name_col = 'name' if 'name' in unlocated_df.columns else unlocated_df.columns[0]
+        # Separate by reason
+        geocoding_failures = unlocated_df[unlocated_df.get('Reason', '') == 'Address could not be geocoded']
+        time_failures = unlocated_df[unlocated_df.get('Reason', '') == 'No available time slots on any day']
         
-        # Use the correct name column - look for apartment name first
-        unlocated_list = ""
-        for _, row in unlocated_df.iterrows():
-            location_name = row.get('Apartment', row.get('name', 'Unknown Location'))
-            unlocated_list += f"- {location_name}: {row['address']}<br>"
+        unlocated_sections = []
         
-        suggestions_html = f"<br><br><strong>Suggested Times:</strong><br><pre style='white-space: pre-wrap; margin: 0;'>{unlocated_suggestions}</pre>" if unlocated_suggestions else ""
-        unlocated_section = f"""
-        <div class=\"row mt-3\">
-            <div class=\"col-12\">
-                <div class=\"alert alert-warning\">
-                    <strong>Unlocated Addresses ({len(unlocated_df)}):</strong><br>
-                    {unlocated_list}
+        # Time constraint failures - prominent red box
+        if len(time_failures) > 0:
+            time_list = ""
+            for _, row in time_failures.iterrows():
+                location_name = row.get('Location', row.get('name', 'Unknown Location'))
+                priority = row.get('Priority', 'Normal')
+                priority_badge = f'<span class="badge bg-danger">High Priority</span>' if priority == 'High' else ''
+                time_list += f"<div class='mb-2'><strong>{location_name}</strong> {priority_badge}<br><small class='text-muted'>{row.get('Address', row.get('address', 'Unknown Address'))}</small><br><small>{row.get('Price/Cost', 'N/A')}</small></div>"
+            
+            unlocated_sections.append(f"""
+            <div class="alert alert-danger border-danger" style="border-width: 3px;">
+                <h5 class="alert-heading text-danger">
+                    <i class="fas fa-exclamation-triangle me-2"></i>
+                    UNSCHEDULED EVENTS ({len(time_failures)})
+                </h5>
+                <p class="mb-3"><strong>These locations could not be scheduled due to time constraints:</strong></p>
+                {time_list}
+                <hr>
+                <p class="mb-0 small"><i class="fas fa-lightbulb me-1"></i> <strong>Solutions:</strong> Extend day hours, reduce visit duration, or move to additional days.</p>
+            </div>
+            """)
+        
+        # Geocoding failures - yellow warning box
+        if len(geocoding_failures) > 0:
+            geo_list = ""
+            for _, row in geocoding_failures.iterrows():
+                location_name = row.get('Location', row.get('name', 'Unknown Location'))
+                geo_list += f"<div class='mb-2'><strong>{location_name}</strong><br><small class='text-muted'>{row.get('Address', row.get('address', 'Unknown Address'))}</small></div>"
+            
+            unlocated_sections.append(f"""
+            <div class="alert alert-warning">
+                <h6 class="alert-heading">
+                    <i class="fas fa-map-marker-alt me-2"></i>
+                    Unlocated Addresses ({len(geocoding_failures)})
+                </h6>
+                <p class="mb-2"><strong>These addresses could not be found:</strong></p>
+                {geo_list}
+            </div>
+            """)
+        
+        # Suggested times section
+        suggestions_html = ""
+        if unlocated_suggestions:
+            suggestions_html = f"""
+            <div class="alert alert-info">
+                <h6 class="alert-heading">
+                    <i class="fas fa-clock me-2"></i>
+                    Suggested Alternative Times
+                </h6>
+                <pre style='white-space: pre-wrap; margin: 0; background: transparent; border: none; padding: 0;'>{unlocated_suggestions}</pre>
+            </div>
+            """
+        
+        if unlocated_sections or suggestions_html:
+            unlocated_section = f"""
+            <div class="row mt-4">
+                <div class="col-12">
+                    {''.join(unlocated_sections)}
                     {suggestions_html}
                 </div>
             </div>
-        </div>
-        """
+            """
 
     # Prepare directions data
     directions_data, day_options = prepare_directions_data(df, schedule_df)
@@ -2312,32 +2588,47 @@ def main():
     # Step 5: Optimize routes
     df = optimize_routes(df)
     
-    # Step 5.5: Calculate ORS travel times
+    # Step 5.5: Calculate ORS travel times (initial calculation)
     df = calculate_ors_travel_times(df, config=config)
     
     # Step 6: Create schedule
-    schedule_df = create_schedule(df, config=config)
+    schedule_df, unscheduled_from_time_df = create_schedule(df, config=config)
     
-    # Step 6.5: Validate schedule with ORS
+    # Step 6.5: Recalculate ORS travel times based on final schedule order
+    df = recalculate_ors_for_schedule(df, schedule_df, config=config)
+    
+    # Step 6.7: Validate schedule with ORS
     schedule_df, ors_warnings = validate_schedule_with_ors(schedule_df, df, config=config)
     if ors_warnings:
         print_warning("Schedule validation warnings:")
         for warning in ors_warnings:
             print_warning(f"  {warning}")
     
-    # Step 7: Generate time suggestions for unlocated addresses
+    # Step 7: Combine unlocated and unscheduled items
+    all_unscheduled_df = pd.DataFrame()
     unlocated_suggestions = None
+    
+    # Add geocoding failures (unlocated)
     if len(unlocated_df) > 0:
-        print_info(f"Generating time suggestions for {len(unlocated_df)} unlocated addresses...")
-        unlocated_suggestions = suggest_visit_times_for_unlocated(unlocated_df, schedule_df, config)
-        print_info("Time suggestions generated for unlocated addresses.")
+        unlocated_df['Reason'] = 'Address could not be geocoded'
+        all_unscheduled_df = pd.concat([all_unscheduled_df, unlocated_df], ignore_index=True)
+    
+    # Add time constraint failures (unscheduled)
+    if len(unscheduled_from_time_df) > 0:
+        all_unscheduled_df = pd.concat([all_unscheduled_df, unscheduled_from_time_df], ignore_index=True)
+    
+    # Generate suggestions for all unscheduled items
+    if len(all_unscheduled_df) > 0:
+        print_info(f"Generating time suggestions for {len(all_unscheduled_df)} unscheduled addresses...")
+        unlocated_suggestions = suggest_visit_times_for_unlocated(all_unscheduled_df, schedule_df, config)
+        print_info("Time suggestions generated for unscheduled addresses.")
     
     # Step 8: Create output directory using trip name (from CSV filename, no extension)
     trip_name = os.path.splitext(os.path.basename(csv_file))[0]
     trip_output_dir = create_trip_output_directory(trip_name)
     
     # Step 9: Generate HTML maps for the schedule
-    generate_html_maps(df, schedule_df, trip_output_dir, unlocated_suggestions, unlocated_df, ors_warnings)
+    generate_html_maps(df, schedule_df, trip_output_dir, unlocated_suggestions, all_unscheduled_df, ors_warnings)
     
     # Step 10: Generate HTML output for each day (for reference)
     for cluster_id in df['cluster'].unique():
@@ -2370,8 +2661,14 @@ def main():
         count = len(df[df['cluster'] == cluster_id])
         print_info(f"Day {int(cluster_id) + 1} ({date}): {count} locations")
     
-    if len(unlocated_df) > 0:
-        print_warning(f"Unlocated addresses: {len(unlocated_df)} (shown at bottom of combined schedule)")
+    if len(all_unscheduled_df) > 0:
+        geocoding_failures = len(all_unscheduled_df[all_unscheduled_df['Reason'] == 'Address could not be geocoded'])
+        time_failures = len(all_unscheduled_df[all_unscheduled_df['Reason'] == 'No available time slots on any day'])
+        print_warning(f"Unscheduled items: {len(all_unscheduled_df)} total")
+        if geocoding_failures > 0:
+            print_warning(f"  - {geocoding_failures} failed geocoding")
+        if time_failures > 0:
+            print_warning(f"  - {time_failures} failed scheduling due to time constraints")
     
     print_info(f"All output files saved to: {trip_output_dir}")
     print_info("Combined HTML file opened automatically in your browser!")

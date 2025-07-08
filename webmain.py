@@ -24,14 +24,32 @@ app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max file size
 # Ensure upload folder exists
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
-# Global variable to track processing status
+# Global variables for status tracking
 processing_status = {
     'is_processing': False,
     'progress': 0,
-    'message': '',
+    'message': 'Ready',
     'output_dir': None,
     'error': None
 }
+
+# Global debug output storage
+debug_output = []
+debug_lock = threading.Lock()
+
+def add_debug_output(message):
+    """Add a message to the debug output with timestamp"""
+    with debug_lock:
+        timestamp = datetime.now().strftime('%H:%M:%S')
+        debug_output.append(f"[{timestamp}] {message}")
+        # Keep only last 1000 messages to prevent memory issues
+        if len(debug_output) > 1000:
+            debug_output.pop(0)
+
+def clear_debug_output():
+    """Clear all debug output"""
+    with debug_lock:
+        debug_output.clear()
 
 def load_config():
     """Load configuration from config.json"""
@@ -129,6 +147,12 @@ def run_scheduler(csv_file, debug=False):
         processing_status['message'] = 'Starting scheduler...'
         processing_status['error'] = None
         
+        # Clear previous debug output
+        clear_debug_output()
+        add_debug_output("=== Starting Location Scheduler ===")
+        add_debug_output(f"CSV file: {csv_file}")
+        add_debug_output(f"Debug mode: {'enabled' if debug else 'disabled'}")
+        
         # Build command using the new simplified interface
         cmd = ['python', 'main.py', csv_file]
         if debug:
@@ -136,16 +160,53 @@ def run_scheduler(csv_file, debug=False):
         
         processing_status['progress'] = 20
         processing_status['message'] = 'Running geocoding...'
+        add_debug_output(f"Executing command: {' '.join(cmd)}")
         
-        # Execute the main script directly
-        result = subprocess.run(cmd, capture_output=True, text=True, cwd=os.getcwd())
+        # Execute the main script with real-time output capture
+        process = subprocess.Popen(
+            cmd, 
+            stdout=subprocess.PIPE, 
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            universal_newlines=True
+        )
         
-        processing_status['progress'] = 80
+        # Read output line by line in real-time
+        while True:
+            output = process.stdout.readline()
+            if output == '' and process.poll() is not None:
+                break
+            if output:
+                add_debug_output(output.strip())
+                
+                # Update progress based on output keywords
+                if 'geocoding' in output.lower():
+                    processing_status['progress'] = 30
+                    processing_status['message'] = 'Geocoding addresses...'
+                elif 'clustering' in output.lower():
+                    processing_status['progress'] = 50
+                    processing_status['message'] = 'Clustering locations...'
+                elif 'optimizing' in output.lower():
+                    processing_status['progress'] = 60
+                    processing_status['message'] = 'Optimizing routes...'
+                elif 'schedule' in output.lower():
+                    processing_status['progress'] = 70
+                    processing_status['message'] = 'Creating schedule...'
+                elif 'html' in output.lower():
+                    processing_status['progress'] = 80
+                    processing_status['message'] = 'Generating HTML output...'
+        
+        # Wait for process to complete
+        return_code = process.wait()
+        
+        processing_status['progress'] = 90
         processing_status['message'] = 'Processing results...'
         
-        if result.returncode == 0:
+        if return_code == 0:
             processing_status['progress'] = 100
             processing_status['message'] = 'Completed successfully!'
+            add_debug_output("=== Processing completed successfully! ===")
             
             # Try to find the output directory
             output_base = 'output'
@@ -156,15 +217,19 @@ def run_scheduler(csv_file, debug=False):
                     # Get the most recently modified directory
                     latest_dir = max(subdirs, key=lambda d: os.path.getmtime(os.path.join(output_base, d)))
                     processing_status['output_dir'] = os.path.join(output_base, latest_dir)
+                    add_debug_output(f"Output directory: {processing_status['output_dir']}")
         else:
-            processing_status['error'] = f"Error: {result.stderr}\nOutput: {result.stdout}"
+            processing_status['error'] = f"Process failed with return code {return_code}"
             processing_status['message'] = 'Processing failed'
+            add_debug_output(f"=== Processing failed with return code {return_code} ===")
             
     except Exception as e:
         processing_status['error'] = str(e)
         processing_status['message'] = 'Processing failed'
+        add_debug_output(f"=== ERROR: {str(e)} ===")
     finally:
         processing_status['is_processing'] = False
+        add_debug_output("=== Scheduler finished ===")
 
 @app.route('/')
 def index():
@@ -293,6 +358,21 @@ def generate_report():
 def get_status():
     """Get current processing status"""
     return jsonify(processing_status)
+
+@app.route('/debug-output')
+def get_debug_output():
+    """Get current debug output"""
+    with debug_lock:
+        return jsonify({
+            'output': debug_output.copy(),
+            'count': len(debug_output)
+        })
+
+@app.route('/clear-debug', methods=['POST'])
+def clear_debug():
+    """Clear debug output"""
+    clear_debug_output()
+    return jsonify({'status': 'cleared'})
 
 @app.route('/results-data')
 def get_results_data():

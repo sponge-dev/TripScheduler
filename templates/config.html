@@ -36,7 +36,7 @@
                                     <input type="number" class="form-control" id="default_buffer_minutes" 
                                            name="default_buffer_minutes" min="5" max="120"
                                            value="{{ config.default_buffer_minutes }}">
-                                    <div class="form-text">Travel time between locations</div>
+                                    <div class="form-text">Travel time needed to drive between locations</div>
                                 </div>
                             </div>
                             <div class="col-md-4">
@@ -229,7 +229,7 @@
                 <div class="mb-3">
                     <h6>Buffer Time</h6>
                     <p class="small text-muted">
-                        Travel time between locations. Consider traffic and distance.
+                        Time allocated to drive from one location to the next. This should account for actual travel time, traffic, and finding parking. The system will auto-adjust if real driving times exceed this buffer.
                     </p>
                 </div>
                 

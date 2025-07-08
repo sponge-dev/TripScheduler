@@ -51,7 +51,7 @@ Your CSV file should have columns for:
 - Location name (apartment, event, location, name, venue, place)
 - Address (full street address)
 - Price information (optional - rent, cost, fee, rate)
-- Buffer time (optional - custom wait time in minutes)
+- Buffer time (optional - custom travel time in minutes between locations)
 
 Place your CSV file in the `spreadsheets/` directory or upload through the web interface.
 
